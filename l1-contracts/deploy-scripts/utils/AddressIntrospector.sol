@@ -41,6 +41,7 @@ library AddressIntrospector {
         address legacyValidatorTimelock;
         address admin;
         address serverNotifier;
+        address bytecodesSupplier;
         address governance;
     }
 
@@ -108,6 +109,7 @@ library AddressIntrospector {
         info.admin = _ctm.admin();
         info.governance = IOwnable(ctmAddr).owner();
         info.serverNotifier = _ctm.serverNotifierAddress();
+        info.bytecodesSupplier = _ctm.bytecodesSupplierAddress();
     }
 
     function getZkChainAddresses(IZKChain _zkChain) public view returns (ZkChainAddresses memory info) {

@@ -4,7 +4,6 @@ pragma solidity 0.8.28;
 import "forge-std/Test.sol";
 import "contracts/upgrades/BytecodesSupplier.sol";
 import "contracts/common/l2-helpers/L2ContractHelper.sol";
-import "contracts/common/L1ContractErrors.sol";
 
 contract BytecodesSupplierTest is Test {
     BytecodesSupplier bytecodesSupplier;
@@ -29,25 +28,29 @@ contract BytecodesSupplierTest is Test {
         emit BytecodePublished(bytecodeHash, bytecode);
 
         // Publish the bytecode
-        bytecodesSupplier.publishBytecode(bytecode);
+        bytecodesSupplier.publishEraVMBytecode(bytecode);
 
-        // Check that the publishingBlock mapping is updated
-        uint256 publishedBlock = bytecodesSupplier.publishingBlock(bytecodeHash);
+        // Check that the publishing block mapping is updated
+        uint256 publishedBlock = bytecodesSupplier.eraVMPublishingBlock(bytecodeHash);
         assertEq(publishedBlock, block.number);
     }
 
-    function testPublishBytecodeAlreadyPublished() public {
+    function testPublishBytecodeOverwrite() public {
         bytes memory bytecode = bytecode1;
 
         // Calculate the bytecode hash
         bytes32 bytecodeHash = L2ContractHelper.hashL2Bytecode(bytecode);
 
         // Publish the bytecode
-        bytecodesSupplier.publishBytecode(bytecode);
+        bytecodesSupplier.publishEraVMBytecode(bytecode);
 
-        // Try to publish the same bytecode again, expect revert
-        vm.expectRevert(abi.encodeWithSelector(BytecodeAlreadyPublished.selector, bytecodeHash));
-        bytecodesSupplier.publishBytecode(bytecode);
+        vm.roll(block.number + 1);
+
+        // Publish the same bytecode again to overwrite the publishing block
+        bytecodesSupplier.publishEraVMBytecode(bytecode);
+
+        uint256 publishedBlock = bytecodesSupplier.eraVMPublishingBlock(bytecodeHash);
+        assertEq(publishedBlock, block.number);
     }
 
     function testPublishMultipleBytecodes() public {
@@ -68,7 +71,7 @@ contract BytecodesSupplierTest is Test {
         // Check that both bytecodes are published
         for (uint256 i = 0; i < bytecodes.length; ++i) {
             bytes32 bytecodeHash = L2ContractHelper.hashL2Bytecode(bytecodes[i]);
-            uint256 publishedBlock = bytecodesSupplier.publishingBlock(bytecodeHash);
+            uint256 publishedBlock = bytecodesSupplier.eraVMPublishingBlock(bytecodeHash);
             assertEq(publishedBlock, block.number);
         }
     }
@@ -79,13 +82,15 @@ contract BytecodesSupplierTest is Test {
         bytecodes[1] = bytecode2;
 
         // Publish the first bytecode
-        bytecodesSupplier.publishBytecode(bytecodes[0]);
+        bytecodesSupplier.publishEraVMBytecode(bytecodes[0]);
 
-        // Calculate the bytecode hash of the first bytecode
-        bytes32 bytecodeHash = L2ContractHelper.hashL2Bytecode(bytecodes[0]);
+        vm.roll(block.number + 1);
 
-        // Now try to publish both bytecodes, one of which is already published
-        vm.expectRevert(abi.encodeWithSelector(BytecodeAlreadyPublished.selector, bytecodeHash));
+        // Now publish both bytecodes, one of which is already published
         bytecodesSupplier.publishBytecodes(bytecodes);
+
+        bytes32 bytecodeHash = L2ContractHelper.hashL2Bytecode(bytecodes[0]);
+        uint256 publishedBlock = bytecodesSupplier.eraVMPublishingBlock(bytecodeHash);
+        assertEq(publishedBlock, block.number);
     }
 }

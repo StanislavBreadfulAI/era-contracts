@@ -395,7 +395,8 @@ library GatewayCTMDeployerHelper {
             validatorTimelock: _deployedContracts.stateTransition.validatorTimelock,
             chainCreationParams: chainCreationParams,
             protocolVersion: _config.protocolVersion,
-            serverNotifier: _deployedContracts.stateTransition.serverNotifierProxy
+            serverNotifier: _deployedContracts.stateTransition.serverNotifierProxy,
+            bytecodesSupplier: address(0)
         });
 
         bytes memory initCalldata = abi.encodeCall(IChainTypeManager.initialize, (diamondInitData));

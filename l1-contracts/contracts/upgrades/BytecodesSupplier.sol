@@ -3,7 +3,6 @@
 pragma solidity 0.8.28;
 
 import {L2ContractHelper} from "../common/l2-helpers/L2ContractHelper.sol";
-import {BytecodeAlreadyPublished} from "../common/L1ContractErrors.sol";
 
 /// @author Matter Labs
 /// @custom:security-contact security@matterlabs.dev
@@ -16,18 +15,31 @@ contract BytecodesSupplier {
     event BytecodePublished(bytes32 indexed bytecodeHash, bytes bytecode);
 
     /// @notice Mapping of bytecode hashes to the block number when they were published.
-    mapping(bytes32 bytecodeHash => uint256 blockNumber) public publishingBlock;
+    /// @dev Publishing block can be overridden since providers might not want to return old data.
+    mapping(bytes32 bytecodeHash => uint256 blockNumber) public eraVMPublishingBlock;
 
-    /// @notice Publishes the bytecode hash and the bytecode itself.
+    /// @notice Mapping of EVM bytecode hashes to the block number when they were published.
+    /// @dev Publishing block can be overridden since providers might not want to return old data.
+    mapping(bytes32 bytecodeHash => uint256 blockNumber) public evmPublishingBlock;
+
+    /// @notice Publishes the EraVM bytecode hash and the bytecode itself.
     /// @param _bytecode Bytecode to be published.
-    function publishBytecode(bytes calldata _bytecode) public {
+    function publishEraVMBytecode(bytes calldata _bytecode) public {
         bytes32 bytecodeHash = L2ContractHelper.hashL2BytecodeCalldata(_bytecode);
 
-        if (publishingBlock[bytecodeHash] != 0) {
-            revert BytecodeAlreadyPublished(bytecodeHash);
-        }
+        // Can be overridden since providers might not want to return old data.
+        eraVMPublishingBlock[bytecodeHash] = block.number;
 
-        publishingBlock[bytecodeHash] = block.number;
+        emit BytecodePublished(bytecodeHash, _bytecode);
+    }
+
+    /// @notice Publishes the bytecode in EVM mode.
+    /// @param _bytecode Bytecode to be published.
+    function publishEvmBytecode(bytes calldata _bytecode) public {
+        bytes32 bytecodeHash = keccak256(_bytecode);
+
+        // Can be overridden since providers might not want to return old data.
+        evmPublishingBlock[bytecodeHash] = block.number;
 
         emit BytecodePublished(bytecodeHash, _bytecode);
     }
@@ -37,7 +49,7 @@ contract BytecodesSupplier {
     function publishBytecodes(bytes[] calldata _bytecodes) external {
         // solhint-disable-next-line gas-length-in-loops
         for (uint256 i = 0; i < _bytecodes.length; ++i) {
-            publishBytecode(_bytecodes[i]);
+            publishEraVMBytecode(_bytecodes[i]);
         }
     }
 }

@@ -261,7 +261,8 @@ abstract contract DeployCTMUtils is DeployUtils {
                 validatorTimelock: stateTransition.validatorTimelock,
                 chainCreationParams: chainCreationParams,
                 protocolVersion: config.contracts.chainCreationParams.latestProtocolVersion,
-                serverNotifier: stateTransition.serverNotifierProxy
+                serverNotifier: stateTransition.serverNotifierProxy,
+                bytecodesSupplier: stateTransition.bytecodesSupplier
             });
     }
 
@@ -500,6 +501,8 @@ abstract contract DeployCTMUtils is DeployUtils {
                 );
         } else if (compareStrings(contractName, "ServerNotifier")) {
             return abi.encodeCall(ServerNotifier.initialize, (config.deployerAddress));
+        } else if (compareStrings(contractName, "BytecodesSupplier")) {
+            return "";
         } else if (compareStrings(contractName, "ValidatorTimelock")) {
             return
                 abi.encodeCall(

@@ -31,14 +31,12 @@ library BytecodePublisher {
 
         for (uint256 i = 0; i < totalBytecodes; i++) {
             bytes32 hash = L2ContractHelper.hashL2Bytecode(bytecodes[i]);
-            if (bytecodesSupplier.publishingBlock(hash) != 0) {
-                console.log("The following bytecode has already been published:");
-                console.logBytes32(hash);
-                continue;
+            if (bytecodesSupplier.eraVMPublishingBlock(hash) != 0) {
+                console.log("The following bytecode has already been published; overwriting:");
             } else {
                 console.log("Publishing the following bytecode:");
-                console.logBytes32(hash);
             }
+            console.logBytes32(hash);
 
             uint256 bytecodeSize = bytecodes[i].length;
 

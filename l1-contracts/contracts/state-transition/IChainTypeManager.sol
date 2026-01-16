@@ -13,6 +13,7 @@ import {FeeParams} from "./chain-deps/ZKChainStorage.sol";
 /// @param chainCreationParams The struct that contains the fields that define how a new chain should be created
 /// @param protocolVersion The initial protocol version on the newly deployed chain
 /// @param serverNotifier The address that serves as server notifier
+/// @param bytecodesSupplier The address that supplies bytecodes for upgrades
 // solhint-disable-next-line gas-struct-packing
 struct ChainTypeManagerInitializeData {
     address owner;
@@ -20,6 +21,7 @@ struct ChainTypeManagerInitializeData {
     ChainCreationParams chainCreationParams;
     uint256 protocolVersion;
     address serverNotifier;
+    address bytecodesSupplier;
 }
 
 /// @notice The struct that contains the fields that define how a new chain should be created
@@ -68,6 +70,9 @@ interface IChainTypeManager {
 
     /// @notice ServerNotifier changed
     event NewServerNotifier(address indexed oldServerNotifier, address indexed newServerNotifier);
+
+    /// @notice BytecodesSupplier changed
+    event NewBytecodesSupplier(address indexed oldBytecodesSupplier, address indexed newBytecodesSupplier);
 
     /// @notice chain creation parameters changed
     event NewChainCreationParams(
@@ -122,6 +127,8 @@ interface IChainTypeManager {
     function getProtocolVersion(uint256 _chainId) external view returns (uint256);
 
     function serverNotifierAddress() external view returns (address);
+
+    function bytecodesSupplierAddress() external view returns (address);
 
     function validatorTimelock() external view returns (address);
 
