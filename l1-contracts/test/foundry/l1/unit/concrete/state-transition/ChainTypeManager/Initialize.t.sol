@@ -25,7 +25,8 @@ contract ChainTypeManagerInitializeTest is ChainTypeManagerTest {
             validatorTimelock: validator,
             chainCreationParams: params,
             protocolVersion: 0,
-            serverNotifier: serverNotifier
+            serverNotifier: serverNotifier,
+            bytecodesSupplier: bytecodesSupplier
         });
 
         EraChainTypeManager ctm = new EraChainTypeManager(address(bridgehub), interopCenterAddress);

@@ -63,6 +63,7 @@ contract ChainTypeManagerTest is UtilsCallMockerTest {
     address internal validator;
     address internal l1Nullifier;
     address internal serverNotifier;
+    address internal bytecodesSupplier;
     bytes32 internal baseTokenAssetId = DataEncoding.encodeNTVAssetId(block.chainid, baseToken);
     address internal newChainAdmin;
     uint256 l1ChainId = 5;
@@ -87,6 +88,7 @@ contract ChainTypeManagerTest is UtilsCallMockerTest {
         validator = makeAddr("validator");
         l1Nullifier = makeAddr("l1Nullifier");
         serverNotifier = makeAddr("serverNotifier");
+        bytecodesSupplier = makeAddr("bytecodesSupplier");
         bridgehub = new L1Bridgehub(governor, MAX_NUMBER_OF_ZK_CHAINS);
         messageroot = new L1MessageRoot(address(bridgehub), 1);
         chainAssetHandler = new L1ChainAssetHandler(
@@ -187,7 +189,8 @@ contract ChainTypeManagerTest is UtilsCallMockerTest {
             validatorTimelock: validator,
             chainCreationParams: chainCreationParams,
             protocolVersion: 0,
-            serverNotifier: serverNotifier
+            serverNotifier: serverNotifier,
+            bytecodesSupplier: bytecodesSupplier
         });
 
         vm.expectRevert(ZeroAddress.selector);
@@ -202,7 +205,8 @@ contract ChainTypeManagerTest is UtilsCallMockerTest {
             validatorTimelock: validator,
             chainCreationParams: chainCreationParams,
             protocolVersion: 0,
-            serverNotifier: serverNotifier
+            serverNotifier: serverNotifier,
+            bytecodesSupplier: bytecodesSupplier
         });
 
         TransparentUpgradeableProxy transparentUpgradeableProxy = new TransparentUpgradeableProxy(

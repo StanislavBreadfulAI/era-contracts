@@ -460,7 +460,9 @@ contract GatewayCTMDeployer {
             validatorTimelock: _deployedContracts.stateTransition.validatorTimelock,
             chainCreationParams: chainCreationParams,
             protocolVersion: _config.protocolVersion,
-            serverNotifier: _deployedContracts.stateTransition.serverNotifierProxy
+            serverNotifier: _deployedContracts.stateTransition.serverNotifierProxy,
+            // Bytecodes supplier is expected to be unset on Gateway since it is only used on L1.
+            bytecodesSupplier: address(0)
         });
 
         bytes memory initCalldata = abi.encodeCall(IChainTypeManager.initialize, (diamondInitData));

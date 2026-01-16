@@ -85,6 +85,9 @@ abstract contract ChainTypeManagerBase is IChainTypeManager, ReentrancyGuard, Ow
     /// @dev It's used for easier tracking the upgrade cutData off-chain.
     mapping(uint256 protocolVersion => uint256) public newChainCreationParamsBlock;
 
+    /// @dev The contract that supplies bytecodes for upgrades.
+    address public bytecodesSupplierAddress;
+
     /// @dev Contract is expected to be used as proxy implementation.
     /// @dev Initialize the implementation to prevent Parity hack.
     /// @dev Note, that while the contract does not use `nonReentrant` modifier, we still keep the `reentrancyGuardInitializer`
@@ -168,6 +171,7 @@ abstract contract ChainTypeManagerBase is IChainTypeManager, ReentrancyGuard, Ow
         _setProtocolVersionDeadline(_initializeData.protocolVersion, type(uint256).max);
         validatorTimelockPostV29 = _initializeData.validatorTimelock;
         serverNotifierAddress = _initializeData.serverNotifier;
+        bytecodesSupplierAddress = _initializeData.bytecodesSupplier;
 
         _setChainCreationParams(_initializeData.chainCreationParams);
     }
@@ -276,6 +280,13 @@ abstract contract ChainTypeManagerBase is IChainTypeManager, ReentrancyGuard, Ow
         address oldServerNotifier = serverNotifierAddress;
         serverNotifierAddress = _serverNotifier;
         emit NewServerNotifier(oldServerNotifier, _serverNotifier);
+    }
+
+    /// @param _bytecodesSupplier the new bytecodes supplier address
+    function setBytecodesSupplier(address _bytecodesSupplier) external onlyOwnerOrAdmin {
+        address oldBytecodesSupplier = bytecodesSupplierAddress;
+        bytecodesSupplierAddress = _bytecodesSupplier;
+        emit NewBytecodesSupplier(oldBytecodesSupplier, _bytecodesSupplier);
     }
 
     /// @dev set New Version with upgrade from old version

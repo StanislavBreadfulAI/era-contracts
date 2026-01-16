@@ -143,7 +143,10 @@ contract DeployCTMScript is Script, DeployCTMUtils {
         deployDAValidators();
         deployIfNeededMulticall3();
 
-        addresses.stateTransition.bytecodesSupplier = deploySimpleContract("BytecodesSupplier", false);
+        // Reuse the same proxy admin for server notifier and bytecodes supplier.
+        address ecosystemProxyAdmin = deployWithCreate2AndOwner("ProxyAdmin", addresses.chainAdmin, false);
+
+        (, addresses.stateTransition.bytecodesSupplier) = deployBytecodesSupplier(ecosystemProxyAdmin);
 
         deployVerifiers();
 
@@ -159,7 +162,7 @@ contract DeployCTMScript is Script, DeployCTMUtils {
         (
             addresses.stateTransition.serverNotifierImplementation,
             addresses.stateTransition.serverNotifierProxy
-        ) = deployServerNotifier();
+        ) = deployServerNotifier(ecosystemProxyAdmin);
 
         initializeGeneratedData();
 
@@ -492,11 +495,12 @@ contract DeployCTMScript is Script, DeployCTMUtils {
         });
     }
 
-    function deployServerNotifier() internal returns (address implementation, address proxy) {
-        // We will not store the address of the ProxyAdmin as it is trivial to query if needed.
-        address ecosystemProxyAdmin = deployWithCreate2AndOwner("ProxyAdmin", addresses.chainAdmin, false);
+    function deployServerNotifier(address proxyAdmin) internal returns (address implementation, address proxy) {
+        (implementation, proxy) = deployTuppWithContractAndProxyAdmin("ServerNotifier", proxyAdmin, false);
+    }
 
-        (implementation, proxy) = deployTuppWithContractAndProxyAdmin("ServerNotifier", ecosystemProxyAdmin, false);
+    function deployBytecodesSupplier(address proxyAdmin) internal returns (address implementation, address proxy) {
+        (implementation, proxy) = deployTuppWithContractAndProxyAdmin("BytecodesSupplier", proxyAdmin, false);
     }
 
     function saveDiamondSelectors() public {
