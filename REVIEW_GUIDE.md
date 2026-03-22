@@ -130,7 +130,28 @@ This guide provides systematic review patterns for finding common issues in test
 
 ---
 
-## 8. Test Coverage Depth
+## 8. Dead Code and Unused Entities
+
+### What to look for
+- Functions, modifiers, events, errors, or state variables that are declared but never called or referenced
+- Imported symbols (contracts, libraries, interfaces) that are never used in the file
+- TypeScript functions, types, or constants that are exported but referenced nowhere in the codebase
+- Parameters that are accepted by a function but ignored in the body (often named `_param` as a hint)
+
+### Questions to ask
+- Is this function/event/error reachable from any external or internal call path?
+- Was this entity introduced speculatively ("we might need it later") without a current caller?
+- If a parameter is unused, is the function signature correct, or was the parameter accidentally dropped from the body?
+
+### Red flags
+- `event Foo(...)` declared with no `emit Foo(...)` anywhere in the contract or its inheritors
+- `function _helper(...) internal` with no call sites in the file or any file that inherits/uses the contract
+- `import { SomeContract } from "..."` with no reference to `SomeContract` in the importing file
+- An `error CustomError(...)` defined but never used in a `revert` statement
+
+---
+
+## 9. Test Coverage Depth
 
 ### What to look for
 - Tests that verify deployment happened (addresses are non-null) but don't verify the configuration is correct
@@ -151,3 +172,4 @@ This guide provides systematic review patterns for finding common issues in test
 5. **Check existing utilities** — is the codebase's tracker/helper/snapshot abstraction being used consistently?
 6. **Read each test name** — does it match what the test body does?
 7. **Check each struct/interface** — are fields per-instance or shared? Are semantics consistent?
+8. **Scan for dead code** — every new function, event, error, and import should have at least one call/reference site.
