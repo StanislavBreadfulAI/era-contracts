@@ -121,25 +121,50 @@ while [ "$idx" -lt "${#PIDS[@]}" ]; do
   idx=$(( idx + 1 ))
 done
 
-# ── Print results in chunk order ─────────────────────────────────────────────
-echo ""
-echo "========================================"
-echo " REVIEW RESULTS (${CHUNK_NUM} subagent(s))"
-echo "========================================"
-echo ""
-
+# ── Concatenate all chunk reports into one file ───────────────────────────────
+COMBINED="$RESULT_TMP/combined.txt"
 idx=0
 while [ "$idx" -lt "$CHUNK_NUM" ]; do
   OUT="$RESULT_TMP/chunk_${idx}.txt"
   if [ -f "$OUT" ]; then
-    echo "-- Chunk $(( idx + 1 ))/${CHUNK_NUM} --"
-    cat "$OUT"
-    echo ""
+    cat "$OUT" >> "$COMBINED"
+    echo "" >> "$COMBINED"
   fi
   idx=$(( idx + 1 ))
 done
 
 if [ "$FAILED" -gt 0 ]; then
-  echo "WARNING: $FAILED subagent(s) failed." >&2
-  exit 1
+  echo "WARNING: $FAILED subagent(s) failed; aggregating partial results." >&2
 fi
+
+# ── Aggregation pass: deduplicate, group by section, validate ─────────────────
+echo "Aggregating ${CHUNK_NUM} subagent report(s)..."
+(
+  cd "$WORKTREE"
+  claude --tools "Read,Glob,Grep" -p \
+"You are a senior code reviewer performing a final aggregation pass.
+
+You have received raw reports from ${CHUNK_NUM} independent subagents that each
+reviewed a different subset of files from the same PR. Your job is to produce
+ONE clean, authoritative review report by doing the following:
+
+1. Read REVIEW_GUIDE.md so you understand each guideline section.
+2. Read the combined raw reports from all subagents at: ${COMBINED}
+3. For each reported issue, read the relevant source file and line to verify
+   the issue is real and accurately described. Discard any finding that does
+   not hold up on inspection.
+4. Deduplicate: multiple subagents may have flagged the same issue (same file,
+   same line, same root cause). Keep only one entry per distinct issue. Two
+   findings are the same issue if they refer to the same code location and the
+   same guideline — even if worded differently.
+5. Group the surviving findings by the REVIEW_GUIDE.md section they belong to
+   (§1 Mocking, §2 Assertions, §3 Magic Numbers, etc.). Within each section,
+   list findings in file-path order.
+6. Format each finding as:
+     **File**: path/to/file.ext line N
+     **Guideline**: §N — Section Name
+     **Issue**: one clear sentence describing the problem.
+
+Output only the final grouped report. Do not include preamble, commentary on
+the aggregation process, or issues that failed verification."
+)
