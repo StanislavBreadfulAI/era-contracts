@@ -45,7 +45,11 @@ cp "$REPO_ROOT/ADDITIONAL_CONTEXT.md" "$WORKTREE/"
 
 # ── Collect changed files ─────────────────────────────────────────────────────
 echo "Collecting changed files..."
-mapfile -t ALL_FILES < <(
+# mapfile requires bash 4+; use a portable while-read loop instead (works on macOS bash 3)
+ALL_FILES=()
+while IFS= read -r f; do
+  ALL_FILES+=("$f")
+done < <(
   git -C "$WORKTREE" diff --name-only "origin/${BASE_BRANCH}...HEAD" \
     | grep -E '\.(sol|ts)$' \
     | while read -r f; do [ -f "$WORKTREE/$f" ] && echo "$f"; done
