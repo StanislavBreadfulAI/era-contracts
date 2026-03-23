@@ -5,6 +5,8 @@
 # Creates a temporary git worktree for the PR branch so the current branch
 # is never modified. Changed .sol and .ts files are split into chunks and
 # reviewed in parallel by independent Claude subagents (read-only).
+#
+# Compatible with bash 3.2+ (macOS default).
 
 set -e
 
@@ -27,7 +29,8 @@ done
 # ── Create a worktree for the PR branch ──────────────────────────────────────
 WORKTREE=$(mktemp -d)
 RESULT_TMP=$(mktemp -d)
-trap 'git worktree remove --force "$WORKTREE" 2>/dev/null; rm -rf "$RESULT_TMP"' EXIT
+FILES_TMP=$(mktemp)
+trap 'git worktree remove --force "$WORKTREE" 2>/dev/null; rm -rf "$RESULT_TMP" "$FILES_TMP"' EXIT
 
 echo "Fetching PR #${PR_NUMBER}..."
 git fetch origin "pull/${PR_NUMBER}/head:pr-${PR_NUMBER}" --force 2>/dev/null \
@@ -43,17 +46,20 @@ git worktree add "$WORKTREE" "pr-${PR_NUMBER}" 2>/dev/null \
 cp "$REPO_ROOT/REVIEW_GUIDE.md" "$WORKTREE/"
 cp "$REPO_ROOT/ADDITIONAL_CONTEXT.md" "$WORKTREE/"
 
-# ── Collect changed files ─────────────────────────────────────────────────────
+# ── Collect changed files (into a temp file to avoid process substitution) ───
 echo "Collecting changed files..."
-# mapfile requires bash 4+; use a portable while-read loop instead (works on macOS bash 3)
+git -C "$WORKTREE" diff --name-only "origin/${BASE_BRANCH}...HEAD" \
+  | grep -E '\.(sol|ts)$' \
+  | while IFS= read -r f; do
+      [ -f "$WORKTREE/$f" ] && echo "$f"
+    done \
+  > "$FILES_TMP"
+
+# Read the temp file into an array (plain redirection — works on bash 3.2)
 ALL_FILES=()
 while IFS= read -r f; do
   ALL_FILES+=("$f")
-done < <(
-  git -C "$WORKTREE" diff --name-only "origin/${BASE_BRANCH}...HEAD" \
-    | grep -E '\.(sol|ts)$' \
-    | while read -r f; do [ -f "$WORKTREE/$f" ] && echo "$f"; done
-)
+done < "$FILES_TMP"
 
 if [ ${#ALL_FILES[@]} -eq 0 ]; then
   echo "No .sol or .ts files changed in this PR."
@@ -65,9 +71,18 @@ echo "Found ${#ALL_FILES[@]} file(s) to review, chunk size ${CHUNK_SIZE}."
 # ── Spawn one subagent per chunk ──────────────────────────────────────────────
 CHUNK_NUM=0
 PIDS=()
+TOTAL=${#ALL_FILES[@]}
+i=0
 
-for (( i=0; i<${#ALL_FILES[@]}; i+=CHUNK_SIZE )); do
-  CHUNK=("${ALL_FILES[@]:i:CHUNK_SIZE}")
+while [ "$i" -lt "$TOTAL" ]; do
+  # Slice ALL_FILES[i .. i+CHUNK_SIZE-1] without bash 4 array slicing
+  CHUNK=()
+  j=0
+  while [ "$j" -lt "$CHUNK_SIZE" ] && [ "$(( i + j ))" -lt "$TOTAL" ]; do
+    CHUNK+=("${ALL_FILES[$(( i + j ))]}")
+    j=$(( j + 1 ))
+  done
+
   FILE_LIST=$(printf "   - %s\n" "${CHUNK[@]}")
   OUT="$RESULT_TMP/chunk_${CHUNK_NUM}.txt"
 
@@ -90,33 +105,38 @@ ${FILE_LIST}
 
   PIDS+=($!)
   CHUNK_NUM=$(( CHUNK_NUM + 1 ))
+  i=$(( i + CHUNK_SIZE ))
 done
 
 echo "Launched ${CHUNK_NUM} subagent(s). Waiting for results..."
 
 # ── Wait for all subagents ────────────────────────────────────────────────────
 FAILED=0
-for i in "${!PIDS[@]}"; do
-  if ! wait "${PIDS[$i]}"; then
-    echo "WARNING: subagent $i exited with an error." >&2
-    FAILED=$(( FAILED + 1 )) || true
+idx=0
+while [ "$idx" -lt "${#PIDS[@]}" ]; do
+  if ! wait "${PIDS[$idx]}"; then
+    echo "WARNING: subagent $idx exited with an error." >&2
+    FAILED=$(( FAILED + 1 ))
   fi
+  idx=$(( idx + 1 ))
 done
 
 # ── Print results in chunk order ─────────────────────────────────────────────
 echo ""
-echo "════════════════════════════════════════"
+echo "========================================"
 echo " REVIEW RESULTS (${CHUNK_NUM} subagent(s))"
-echo "════════════════════════════════════════"
+echo "========================================"
 echo ""
 
-for (( i=0; i<CHUNK_NUM; i++ )); do
-  OUT="$RESULT_TMP/chunk_${i}.txt"
+idx=0
+while [ "$idx" -lt "$CHUNK_NUM" ]; do
+  OUT="$RESULT_TMP/chunk_${idx}.txt"
   if [ -f "$OUT" ]; then
-    echo "── Chunk $((i+1))/${CHUNK_NUM} ──"
+    echo "-- Chunk $(( idx + 1 ))/${CHUNK_NUM} --"
     cat "$OUT"
     echo ""
   fi
+  idx=$(( idx + 1 ))
 done
 
 if [ "$FAILED" -gt 0 ]; then
