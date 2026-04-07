@@ -1,9 +1,18 @@
 # General guidelines
 
+## NEVER kill Anvil processes globally
+
+**THIS IS AN ABSOLUTE RULE - NO EXCEPTIONS**
+
+Never run `pkill -f anvil`, `killall anvil`, or any blanket kill command for Anvil processes. Multiple Anvil sessions may be running in parallel (e.g., interop tests, local development chains). Killing all Anvil processes can destroy other users' or sessions' work.
+
+Instead, use the `cleanup.sh` script in the anvil-interop directory, which targets only processes on known ports.
+
 ## Code style requirements
 
 1. Avoid using magic numbers. Most constant numbers especially for system params / well known chain ids must be represented as a constant.
 2. All constants should be placed in the dedicated file (e.g. `common/Config.sol` in `l1-contracts`, `Constants.sol` in `system-contracts`, etc). if you do not know where to put the constant to, please closely analyze the corresponding project. If this file can not be found, please create one.
+3. Function parameters must be prefixed with `_` (e.g. `_value`, `_owner`). This convention applies to all functions across all contracts.
 
 ## ⚠️ CRITICAL SOLIDITY CODE RULES ⚠️
 
@@ -44,6 +53,51 @@ address result = _tryAddress(target, "someFunction()");
 - These patterns make debugging extremely difficult
 - They mask initialization issues and timing problems
 - The codebase should fail fast and clearly, not silently return defaults
+
+### NEVER Override Storage Slots in Tests
+
+**THIS IS AN ABSOLUTE RULE - NO EXCEPTIONS**
+
+❌ **FORBIDDEN PATTERNS:**
+
+- `anvil_setStorageAt` to set contract state
+- Any direct manipulation of storage slots to bypass contract logic
+
+✅ **CORRECT APPROACH:**
+
+- Use real contract calls and flows to achieve the desired state
+- If a flow requires multiple steps (e.g., Token Balance Migration), implement all steps properly
+- If a relay transaction fails, fix the root cause instead of setting storage directly
+
+**WHY THIS RULE EXISTS:**
+
+- Storage slot overrides hide real bugs in the test setup
+- They make tests fragile and tightly coupled to storage layout
+- Real flows validate that the contracts work correctly end-to-end
+- Storage layouts change between versions, silently breaking tests
+
+### NEVER Declare ABIs Inline in TypeScript
+
+**THIS IS AN ABSOLUTE RULE - NO EXCEPTIONS**
+
+❌ **FORBIDDEN PATTERNS:**
+
+```typescript
+// NEVER DO THIS:
+const someAbi = ["function someMethod(uint256 param) view returns (address)"];
+const contract = new Contract(addr, someAbi, provider);
+```
+
+✅ **CORRECT APPROACH:**
+
+- Always import ABIs from the centralized `contracts.ts` file (or equivalent ABI module)
+- If an ABI doesn't exist yet, add it to `contracts.ts` and import it
+
+**WHY THIS RULE EXISTS:**
+
+- Inline ABIs are duplicated across files and easily go out of sync with actual contracts
+- Centralized ABIs are easier to maintain and update when contracts change
+- Import-based ABIs provide a single source of truth
 
 ### Constructors and Immutables
 
@@ -100,6 +154,50 @@ These versions require `stdarch_x86_avx512` (stabilized in Rust 1.89) and fail o
 - `zerocopy >= 0.8.39`
 
 Known-good versions: `crc-fast 1.3.0`, `zerocopy 0.8.27`
+
+## Testing Guidelines
+
+All PRs that include feature work, bug fixes, or behavioral changes **MUST** follow these testing requirements.
+
+### Test Structure
+
+Every test **MUST** have proper structure:
+
+- Relevant storage changes **MUST** be asserted.
+- Relevant event emissions **MUST** be asserted.
+- Relevant logic asserts **MUST** be in place.
+- Other relevant side effects **MUST** be asserted.
+- Tests **MUST** validate outcomes — not just execute calls.
+- Only **relevant** effects need to be checked; there is no need to check every storage write, event emission, etc.
+
+### Coverage Requirements
+
+- Any feature PR **MUST** include tests for happy, unhappy, and edge-case paths.
+  - Happy and unhappy path coverage should be straightforward for PR owners and reviewers to verify.
+  - Edge-case testing is best effort: PR owners and reviewers should try their best to ensure good coverage, but it is acknowledged that sometimes not all edge cases can be anticipated.
+- Ideally, testing should include fuzz and invariant tests where possible. Different testing approaches lead to flexibility and thorough coverage.
+- Total coverage **MUST NOT** decrease after any PR.
+  - In rare extraordinary cases (e.g., splitting contracts into L1/L2 counterparts) where maintaining coverage would require disproportionate work relative to PR size, this requirement can be discussed on an individual basis. Such cases should be very rare.
+
+### Mocks
+
+- Mocks **MUST** only be used when the intention is to separate concerns or isolate components.
+- Mocks should **not** be used as a convenience shortcut to simplify setup when triggering the full execution flow is feasible.
+- It should be clear from comments in the test why mocks are being used. The test writer should clearly denote that the file or test is expected to be isolated from the part of the flow being mocked.
+
+### Regression Tests
+
+- Every bug found through audits or the bug bounty program **MUST** have a regression test.
+- If the bug is not yet publicly known, consult with the security team before including the regression test to determine appropriate timing.
+
+### Readability
+
+Tests **MUST** be readable for both humans and AI:
+
+- Follow a clear folder structure: separate folders for contracts, separate test files for sections of a contract or logic blocks.
+- Add comments for non-trivial tests, especially edge cases and complex flows. Missing context is easily recovered by a few well-placed comments.
+- Any guideline deviation (use of mocks, missing checks, etc.) should be explicitly explained in the test.
+- Structure tests and the overall codebase to be AI-friendly: keep things clean, avoid complicated structures, and include in-code documentation. AI usage is increasing, and investing effort into clarity pays off.
 
 ## Debugging Strategies
 
@@ -182,6 +280,33 @@ cd system-contracts
 yarn test:foundry
 ```
 
+### Running Anvil Interop Tests
+
+```bash
+cd l1-contracts
+
+# Run with pre-generated chain states (fastest, ~180s)
+yarn test:hardhat:interop
+
+# Use port offset to avoid conflicts with other Anvil instances
+ANVIL_INTEROP_PORT_OFFSET=100 yarn test:hardhat:interop
+
+# Force fresh deployment (skips pre-generated states, ~330s)
+ANVIL_INTEROP_FRESH_DEPLOY=1 yarn test:hardhat:interop
+
+# Keep chains running after tests (for debugging with cast)
+ANVIL_INTEROP_KEEP_CHAINS=1 yarn test:hardhat:interop
+```
+
+After modifying mock system contracts (e.g., `MockL2ToL1Messenger`, `MockMintBaseTokenHook`), regenerate chain states:
+
+```bash
+cd l1-contracts
+forge build
+cd test/anvil-interop
+npx ts-node setup-and-dump-state.ts
+```
+
 ### Common Issues
 
 1. **Missing zkout files**: If tests fail with "zkout/BeaconProxy.sol/BeaconProxy.json not found", ensure you've built all artifacts with the steps above.
@@ -244,7 +369,15 @@ yarn prettier:fix
 3. **Trailing whitespace**: Will be fixed by prettier
 4. **Missing or extra newlines**: Will be fixed by prettier
 
+## PR Description Maintenance
+
+Whenever an agent makes changes in a PR, it **MUST** update the PR description to reflect the current state of the changes and ensure it is up to date. If the PR already has a description with existing styling or wording, the agent **MUST** follow that same style and tone when updating it.
+
 ## Git Best Practices
+
+### Pushing and Creating PRs
+
+Agents do **not** have push access to the main repository. Always push to a **fork** and create PRs from there. Do not attempt to push directly to `matter-labs/era-contracts`.
 
 ### Never Force Push
 

@@ -15,6 +15,8 @@ error AddressHasNoCode(address);
 error AddressMismatch(address expected, address supplied);
 // 0x42573d7a
 error AddressNotZero();
+// 0xb577eb6c
+error AlreadyDangerousContract(address);
 // 0x2a5989a0
 error AlreadyPermanentRollup();
 // 0x0bfcef28
@@ -306,6 +308,8 @@ error NotAZKChain(address addr);
 error NotCompatibleWithPriorityMode();
 // 0x5e67e793
 error NotCurrentSettlementLayer();
+// 0x2b1dc354
+error NotDangerousContract(address);
 // 0x230f9d11
 error NotEnoughSigners(uint256 provided, uint256 expected);
 // 0xdd7e3621
@@ -450,6 +454,8 @@ error UnsupportedProofBatchEncoding(uint8 version);
 error UnsupportedUpgradeType();
 // 0xf093c2e5
 error UpgradeBatchNumberIsNotZero();
+// 0x04d91f9d
+error UpgradeTimestampNotReached(uint256 upgradeTimestamp, uint256 currentTimestamp);
 // 0x47b3b145
 error ValidateTxnNotEnoughGas();
 // 0x626ade30
@@ -470,6 +476,8 @@ error WrongMagicValue(uint256 expectedMagicValue, uint256 providedMagicValue);
 error ZeroAddress();
 // 0xc84885d4
 error ZeroChainId();
+// 0x16787758
+error ZeroUpgradeTimestamp();
 // 0x601b6882
 error ZKChainLimitReached();
 // 0x646ac57e
