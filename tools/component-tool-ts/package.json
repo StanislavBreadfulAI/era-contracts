@@ -1,0 +1,32 @@
+{
+  "name": "component-tool",
+  "version": "0.1.0",
+  "description": "CLI tool for managing and reviewing conceptual components described by .component.md files",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "component-tool": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "cli-table3": "^0.6.5",
+    "commander": "^12.1.0",
+    "js-yaml": "^4.1.0",
+    "minimatch": "^10.0.1",
+    "uuid": "^10.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.14.0",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^1.6.0"
+  }
+}

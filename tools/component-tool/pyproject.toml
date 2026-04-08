@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "component-tool"
+version = "0.1.0"
+description = "CLI tool for managing and reviewing conceptual components described by .component.md files"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.9",
+    "pydantic>=2.0",
+    "ruamel.yaml>=0.18",
+    "rich>=13.0",
+    "pathspec>=0.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-tmp-files>=0.0.2",
+]
+
+[project.scripts]
+component-tool = "component_tool.cli:app_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
