@@ -77,12 +77,17 @@ export function buildGraph(
   >();
 
   for (const filePath of componentFiles) {
-    const { frontmatter, description } = parseComponentFile(filePath);
-    parsed.set(frontmatter.component_id, {
-      frontmatter,
-      description,
-      filePath,
-    });
+    try {
+      const { frontmatter, description } = parseComponentFile(filePath);
+      parsed.set(frontmatter.component_id, {
+        frontmatter,
+        description,
+        filePath,
+      });
+    } catch {
+      // Skip files without valid YAML frontmatter (e.g. legacy .component.md files)
+      continue;
+    }
   }
 
   // Second pass: build components and contracts

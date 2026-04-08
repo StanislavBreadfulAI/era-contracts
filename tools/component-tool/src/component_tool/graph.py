@@ -105,7 +105,11 @@ def build_graph(
     file_to_id: dict[Path, str] = {}
 
     for file_path in component_files:
-        frontmatter, description = parse_component_file(file_path)
+        try:
+            frontmatter, description = parse_component_file(file_path)
+        except (ValueError, KeyError):
+            # Skip files without valid YAML frontmatter (e.g. legacy .component.md files)
+            continue
         cid = frontmatter.component_id
         parsed[cid] = (frontmatter, description, file_path)
         file_to_id[file_path] = cid
