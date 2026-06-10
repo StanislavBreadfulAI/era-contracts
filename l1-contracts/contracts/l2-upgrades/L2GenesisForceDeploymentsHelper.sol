@@ -16,7 +16,10 @@ import {
     L2_NTV_BEACON_DEPLOYER_ADDR,
     L2_WRAPPED_BASE_TOKEN_IMPL_ADDR,
     L2_SYSTEM_CONTRACT_PROXY_ADMIN_ADDR,
-    L2_INTEROP_CENTER_ADDR
+    L2_INTEROP_CENTER_ADDR,
+    L2_INTEROP_COMMITMENT_TREE_ADDR,
+    L2_GLOBAL_INTEROP_ROOT_IMPORTER_ADDR,
+    L2_ATOMIC_FLOW_ESCROW_ADDR
 } from "../common/l2-helpers/L2ContractAddresses.sol";
 import {IL2BaseTokenBase} from "../l2-system/interfaces/IL2BaseTokenBase.sol";
 import {IL2ContractDeployer} from "../common/interfaces/IL2ContractDeployer.sol";
@@ -40,6 +43,8 @@ import {L2AssetTracker} from "../bridge/asset-tracker/L2AssetTracker.sol";
 import {GWAssetTracker} from "../bridge/asset-tracker/GWAssetTracker.sol";
 import {L2ChainAssetHandler} from "../core/chain-asset-handler/L2ChainAssetHandler.sol";
 import {InteropHandler} from "../interop/InteropHandler.sol";
+import {L2InteropCommitmentTree} from "../atomic-interop/L2InteropCommitmentTree.sol";
+import {AtomicFlowEscrow} from "../atomic-interop/AtomicFlowEscrow.sol";
 import {IL1AssetRouter} from "../bridge/asset-router/IL1AssetRouter.sol";
 import {IL2SharedBridgeLegacy} from "../bridge/interfaces/IL2SharedBridgeLegacy.sol";
 import {
@@ -224,6 +229,7 @@ library L2GenesisForceDeploymentsHelper {
             (ZKChainSpecificForceDeploymentsData)
         );
 
+        // Initialize SystemContractProxyAdmin on both chain types; see _setupProxyAdmin for the per-VM rationale.
         _setupProxyAdmin();
 
         // The aliased L1 governance address is used as the owner for all L2 contracts.
@@ -260,11 +266,17 @@ library L2GenesisForceDeploymentsHelper {
     }
 
     function _setupProxyAdmin() private {
-        // For Era chains, the SystemContractProxyAdmin is never used during deployment, but it is expected to be present
-        // just in case. This line is just for consistency.
-        // For ZKsyncOS chains, we expect that both the contract and the owner have been populated at the time of the genesis.
-        // These are not predeployed only for legacy chains. For them, special logic (not covered here) would be used to ensure
-        // that this contract is predeployed and the owner is set correctly.
+        // Run on both Era and ZKsyncOS so post-upgrade state is symmetric across chain types.
+        //
+        // On ZKsyncOS the proxy admin is on the upgrade critical path: system contracts are
+        // upgraded via SystemContractProxy instances it manages, and ComplexUpgrader (this
+        // contract during the delegate-call) must own it while the upgrade runs.
+        //
+        // On Era system contracts are force-deployed directly to fixed addresses, so the
+        // proxy admin is not used during the upgrade itself. We still populate it here for
+        // consistency. The Era v31 upgrade force-deploys SystemContractProxyAdmin as part of
+        // its system-contracts list (see SYSTEM_CONTRACTS_COUNT in SystemContractsProcessing),
+        // so the address has code by the time we reach the .owner() call below.
         if (SystemContractProxyAdmin(L2_SYSTEM_CONTRACT_PROXY_ADMIN_ADDR).owner() != address(this)) {
             SystemContractProxyAdmin(L2_SYSTEM_CONTRACT_PROXY_ADMIN_ADDR).forceSetOwner(address(this));
         }
@@ -448,9 +460,26 @@ library L2GenesisForceDeploymentsHelper {
         }
 
         // Initialize L2BaseToken: sets L1_CHAIN_ID and initializes the BaseTokenHolder balance.
-        // For Era: reads __DEPRECATED_totalSupply and computes holder balance.
+        // For Era: initializes holder balance, with __DEPRECATED_totalSupply kept in totalSupply().
         // For ZKOS: mints via MINT_BASE_TOKEN_HOOK and transfers to holder.
         IL2BaseTokenBase(L2_BASE_TOKEN_SYSTEM_CONTRACT_ADDR).initL2(_fixedForceDeploymentsData.l1ChainId);
+
+        // Atomic interop (L1-free): wire the escrow to its commitment tree + global-root importer,
+        // and the tree to the escrow. Only ZKsync OS chains predeploy these (see the genesis gen
+        // tool); the global-root importer is permissionless and needs no initialization.
+        if (_isZKsyncOS) {
+            L2InteropCommitmentTree(L2_INTEROP_COMMITMENT_TREE_ADDR).initialize(L2_ATOMIC_FLOW_ESCROW_ADDR);
+            AtomicFlowEscrow(L2_ATOMIC_FLOW_ESCROW_ADDR).initialize(
+                L2_INTEROP_COMMITMENT_TREE_ADDR,
+                L2_GLOBAL_INTEROP_ROOT_IMPORTER_ADDR,
+                L2_ASSET_ROUTER_ADDR,
+                L2_NATIVE_TOKEN_VAULT_ADDR
+            );
+            // Wire the reverse link so the escrow can drive AR/NTV burns (source) and mints
+            // (destination) at execute() time. The genesis force-deployment runs as the complex
+            // upgrader, which `setAtomicFlowEscrow` authorises for this one-shot genesis wiring.
+            L2AssetRouter(L2_ASSET_ROUTER_ADDR).setAtomicFlowEscrow(L2_ATOMIC_FLOW_ESCROW_ADDR);
+        }
     }
 
     /// @notice Returns the address of the legacy shared bridge from the L2 Asset Router.

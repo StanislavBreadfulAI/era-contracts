@@ -16,13 +16,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use alloy::primitives::{Address, B256};
 use anyhow::Context;
 use clap::Parser;
-use ethers::types::{Address, H256};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::commands::output::write_output_if_requested;
+use crate::common::output::write_output_if_requested;
 use crate::common::paths;
 use crate::common::SharedRunArgs;
 use crate::common::{
@@ -48,9 +48,11 @@ pub struct UpgradePrepareArgs {
     pub topology: crate::common::EcosystemArgs,
 
     /// Deployer EOA that signs the new-contract deployment txs emitted by
-    /// this stage.
+    /// this stage. Falls back to the topology source's deployer
+    /// (ecosystem.yaml::deployer or zkstack `configs/wallets.yaml::deployer`)
+    /// when omitted.
     #[clap(long)]
-    pub deployer_address: Address,
+    pub deployer_address: Option<Address>,
 
     // The following are auto-resolved from L1 on v31+ ecosystems.
     // Explicit overrides are only needed when upgrading from pre-v31 protocol
@@ -68,7 +70,7 @@ pub struct UpgradePrepareArgs {
 
     /// CREATE2 factory salt (hex-encoded bytes32). If not provided, a random salt is used.
     #[clap(long)]
-    pub create2_factory_salt: Option<H256>,
+    pub create2_factory_salt: Option<B256>,
 
     /// Forge-internal: upgrade config TOML path relative to l1-contracts root.
     /// Passed through to the Solidity script; rarely needs overriding.
@@ -103,11 +105,16 @@ struct UpgradePrepareOutput<'a> {
 }
 
 pub async fn run_upgrade_prepare(args: UpgradePrepareArgs) -> anyhow::Result<()> {
-    let bridgehub = args.topology.resolve()?.bridgehub;
+    let ecosystem = args.topology.resolve()?;
+    let bridgehub = ecosystem.bridgehub;
+    let deployer_address = args.deployer_address.or(ecosystem.deployer).context(
+        "deployer EOA not specified: pass --deployer-address or use a topology \
+         source that includes a deployer (ecosystem.yaml or --zkstack-config-dir)",
+    )?;
     let mut runner = ForgeRunner::new(&args.shared)?;
-    let sender = runner.prepare_sender(args.deployer_address).await?;
+    let sender = runner.prepare_sender(deployer_address).await?;
 
-    let contracts_path = resolve_l1_contracts_path(&paths::contracts_root())?;
+    let contracts_path = paths::resolve_l1_contracts_path()?;
     let script_path = "deploy-scripts/upgrade/v31/EcosystemUpgrade_v31.s.sol";
     let script_full_path = contracts_path.join(script_path);
     if !script_full_path.exists() {
@@ -187,7 +194,9 @@ pub async fn run_upgrade_prepare(args: UpgradePrepareArgs) -> anyhow::Result<()>
         logger::info(format!("Governance (auto-resolved): {:#x}", resolved));
         resolved
     };
-    let create2_salt = args.create2_factory_salt.unwrap_or_else(H256::random);
+    let create2_salt = args
+        .create2_factory_salt
+        .unwrap_or_else(|| B256::from(rand::random::<[u8; 32]>()));
 
     let upgrade_input = contracts_path.join(args.upgrade_input_path.trim_start_matches('/'));
     if !upgrade_input.exists() {
@@ -355,10 +364,10 @@ pub async fn run_upgrade_governance(args: UpgradeGovernanceArgs) -> anyhow::Resu
     // owner EOA.
     let sender = runner.prepare_governance_owner(bridgehub).await?;
 
-    let contracts_path = resolve_l1_contracts_path(&paths::contracts_root())?;
+    let contracts_path = paths::resolve_l1_contracts_path()?;
     let governance_toml = Some(args.governance_toml.as_path());
 
-    let mut governance_addr = Address::zero();
+    let mut governance_addr = Address::ZERO;
     for stage in 0..=2u8 {
         governance_addr = stage_governance_execute(
             &mut runner,
@@ -398,25 +407,6 @@ pub async fn run_upgrade_governance(args: UpgradeGovernanceArgs) -> anyhow::Resu
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
-fn resolve_l1_contracts_path(repo_root: &Path) -> anyhow::Result<PathBuf> {
-    let direct = repo_root.join("l1-contracts");
-    if direct.exists() {
-        return Ok(direct);
-    }
-
-    let nested = repo_root.join("contracts").join("l1-contracts");
-    if nested.exists() {
-        return Ok(nested);
-    }
-
-    anyhow::bail!(
-        "Could not resolve l1-contracts path under {} (tried {} and {})",
-        repo_root.display(),
-        direct.display(),
-        nested.display()
-    )
-}
 
 #[derive(Debug, Deserialize)]
 struct GovernanceCalls {
