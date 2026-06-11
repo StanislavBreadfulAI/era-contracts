@@ -215,6 +215,15 @@ ETH deposits use `Bridgehub.requestL2TransactionTwoBridges` which routes through
 - **Direct chains** (chain 10): relay L1 -> L2
 - **GW-settled chains** (chain 12): relay L1 -> GW -> L2
 
+### Known limitations
+
+- **L1→L2 transaction failures / refundRecipient**: Priority requests always succeed on Anvil; failure + refund logic is untested
+- **Batch settlement**: No real sequencer or prover; batches are never committed/proved/executed
+- **Custom pubdata pricing**: Gas and pubdata costs use Anvil defaults, not ZKsync fee models
+- **Non-ETH base tokens**: All chains use ETH as the base token
+- **Validium mode**: All chains run as rollup (validium carries no meaning without batch settlement)
+- **Settlement fees**: `processLogsAndMessages` still uses a zero settlement fee payer; interop sends cover non-zero dynamic base-token fees and fixed ZK fees separately
+
 ### Anvil EVM vs ZKsync VM
 
 On ZKsync VM, all functions can receive ETH value even if not marked `payable`. On Anvil (plain EVM), Solidity enforces the callvalue check. This affects:
