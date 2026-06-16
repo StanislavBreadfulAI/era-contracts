@@ -28,6 +28,7 @@ import {MAX_TOKEN_BALANCE} from "contracts/bridge/asset-tracker/IAssetTrackerBas
 import {L2AssetTracker} from "contracts/bridge/asset-tracker/L2AssetTracker.sol";
 import {IL2AssetTracker} from "contracts/bridge/asset-tracker/IL2AssetTracker.sol";
 import {AssetAlreadyRegistered, AssetIdNotRegistered} from "contracts/bridge/asset-tracker/AssetTrackerErrors.sol";
+import {BaseTokenPreV31TotalSupplyNotSet} from "contracts/common/L1ContractErrors.sol";
 import {INativeTokenVaultBase} from "contracts/bridge/ntv/INativeTokenVaultBase.sol";
 import {L2NativeTokenVault} from "contracts/bridge/ntv/L2NativeTokenVault.sol";
 import {TestnetERC20Token} from "contracts/dev-contracts/TestnetERC20Token.sol";
@@ -528,5 +529,168 @@ abstract contract L2AssetTrackerTest is Test, SharedL2ContractDeployer {
             }
         }
         assertTrue(foundEvent, "L1ToGatewayMigrationInitiated event should be emitted");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════
+    //  Regression: base-token `totalSupply()` usage during finalization vs. the
+    //  pre-V31 total-supply backfill (ZKsync OS chains upgraded from a pre-v31 version).
+    //
+    //  `_needToForceSetAssetMigrationOnL2` decides whether to force-set a token's
+    //  migration number by reading `totalSupply()` (a `== 0` value is a proxy for
+    //  "no deposit has ever been finalized"). On a ZKsync OS chain that upgraded from
+    //  a pre-v31 version, the base token's `totalSupply()` is *not readable* until it
+    //  has been backfilled via `backFillZKSyncOSBaseTokenV31MigrationData()` — the call
+    //  reverts with `BaseTokenPreV31TotalSupplyNotSet` (see `L2BaseTokenZKOS.totalSupply()`).
+    //
+    //  Before the fix, the very first base-token deposit finalization after the upgrade
+    //  (`handleFinalizeBaseTokenBridgingOnL2`) reverted with that error until someone
+    //  backfilled the supply, effectively bricking base-token deposits in that window.
+    //  The fix short-circuits the `totalSupply()` read for the base token while a
+    //  backfill is pending: such chains were already running before v31, so their base
+    //  token always has a non-zero supply and the migration number must never be
+    //  force-set.
+    // ════════════════════════════════════════════════════════════════════════════════
+
+    uint256 internal constant _BASE_FINALIZE_AMOUNT = 300;
+    uint256 internal constant _BASE_FINALIZE_L1_CHAIN_ID = 1;
+    uint256 internal constant _CHAIN_MIGRATION_NUMBER = 3;
+
+    /// @dev Mirrors the V31-upgrade setup of an *existing* chain whose base token is
+    ///      registered during the upgrade (`registerBaseTokenDuringUpgrade`) and which
+    ///      settles on L1. `_assetId` is an arbitrary, not-yet-registered asset id.
+    function _setUpBaseTokenForFinalize(bytes32 baseTokenAssetId) internal {
+        stdstore.target(L2_ASSET_TRACKER_ADDR).sig("BASE_TOKEN_ASSET_ID()").checked_write(uint256(baseTokenAssetId));
+        stdstore.target(L2_ASSET_TRACKER_ADDR).sig("L1_CHAIN_ID()").checked_write(_BASE_FINALIZE_L1_CHAIN_ID);
+        stdstore
+            .target(address(L2_NATIVE_TOKEN_VAULT_ADDR))
+            .sig("originChainId(bytes32)")
+            .with_key(baseTokenAssetId)
+            .checked_write(_BASE_FINALIZE_L1_CHAIN_ID);
+
+        // Register the base token exactly as the V31 upgrade does for existing chains.
+        vm.prank(L2_COMPLEX_UPGRADER_ADDR);
+        L2_ASSET_TRACKER.registerBaseTokenDuringUpgrade();
+
+        // Settle on L1 so the deposit accounting branch is exercised.
+        vm.mockCall(
+            address(L2_SYSTEM_CONTEXT_SYSTEM_CONTRACT),
+            abi.encodeWithSelector(L2_SYSTEM_CONTEXT_SYSTEM_CONTRACT.currentSettlementLayerChainId.selector),
+            abi.encode(_BASE_FINALIZE_L1_CHAIN_ID)
+        );
+
+        // Give the chain a non-zero migration number so that a force-set (if it happened)
+        // would be observable as a non-zero asset migration number.
+        stdstore
+            .target(address(L2_CHAIN_ASSET_HANDLER))
+            .sig("migrationNumber(uint256)")
+            .with_key(block.chainid)
+            .checked_write(_CHAIN_MIGRATION_NUMBER);
+    }
+
+    function _setNeedBaseTokenBackfill(bool value) internal {
+        stdstore.target(L2_ASSET_TRACKER_ADDR).sig("needBaseTokenTotalSupplyBackfill()").checked_write(value);
+    }
+
+    /// @dev Makes the base token behave like a ZKsync OS base token whose pre-V31 supply
+    ///      has not yet been backfilled: any `totalSupply()` call reverts.
+    function _mockBaseTokenTotalSupplyReverts() internal {
+        vm.mockCallRevert(
+            address(L2_BASE_TOKEN_SYSTEM_CONTRACT),
+            abi.encodeWithSelector(IERC20.totalSupply.selector),
+            abi.encodeWithSelector(BaseTokenPreV31TotalSupplyNotSet.selector)
+        );
+    }
+
+    function _mockBaseTokenTotalSupply(uint256 supply) internal {
+        vm.mockCall(
+            address(L2_BASE_TOKEN_SYSTEM_CONTRACT),
+            abi.encodeWithSelector(IERC20.totalSupply.selector),
+            abi.encode(supply)
+        );
+    }
+
+    /// @notice The core regression: finalizing a base-token deposit must succeed while the
+    ///         pre-V31 total supply is still pending backfill, even though `totalSupply()`
+    ///         reverts. The migration number must NOT be force-set in that window.
+    function test_handleFinalizeBaseTokenBridgingOnL2_succeedsWhileBackfillPending() public {
+        bytes32 baseTokenAssetId = keccak256("zkos_base_token_pending_backfill");
+        _setUpBaseTokenForFinalize(baseTokenAssetId);
+        _setNeedBaseTokenBackfill(true);
+        _mockBaseTokenTotalSupplyReverts();
+
+        uint256 depositsBefore = _readTotalSuccessfulDepositsFromL1(baseTokenAssetId);
+
+        // Must not revert (before the fix this reverted with BaseTokenPreV31TotalSupplyNotSet).
+        vm.prank(L2_BASE_TOKEN_HOLDER_ADDR);
+        L2_ASSET_TRACKER.handleFinalizeBaseTokenBridgingOnL2(_BASE_FINALIZE_L1_CHAIN_ID, _BASE_FINALIZE_AMOUNT);
+
+        assertEq(
+            _readTotalSuccessfulDepositsFromL1(baseTokenAssetId) - depositsBefore,
+            _BASE_FINALIZE_AMOUNT,
+            "deposit accounting should be updated"
+        );
+        assertEq(
+            L2AssetTracker(L2_ASSET_TRACKER_ADDR).assetMigrationNumber(block.chainid, baseTokenAssetId),
+            0,
+            "migration number must not be force-set while the base-token supply is unknown"
+        );
+    }
+
+    /// @notice Explicitly verify that the `totalSupply()` read is skipped while a backfill is
+    ///         pending: a deposit finalization must succeed even if a revert is the only thing
+    ///         `totalSupply()` could return.
+    function test_handleFinalizeBaseTokenBridgingOnL2_doesNotReadTotalSupplyWhileBackfillPending() public {
+        bytes32 baseTokenAssetId = keccak256("zkos_base_token_no_total_supply_read");
+        _setUpBaseTokenForFinalize(baseTokenAssetId);
+        _setNeedBaseTokenBackfill(true);
+        _mockBaseTokenTotalSupplyReverts();
+
+        vm.prank(L2_BASE_TOKEN_HOLDER_ADDR);
+        L2_ASSET_TRACKER.handleFinalizeBaseTokenBridgingOnL2(_BASE_FINALIZE_L1_CHAIN_ID, _BASE_FINALIZE_AMOUNT);
+    }
+
+    /// @notice After the backfill completed (`needBaseTokenTotalSupplyBackfill == false`) the
+    ///         live `totalSupply()` is readable again and finalization keeps working. With a
+    ///         non-zero supply the migration number is (correctly) not force-set.
+    function test_handleFinalizeBaseTokenBridgingOnL2_afterBackfillReadsTotalSupply() public {
+        bytes32 baseTokenAssetId = keccak256("zkos_base_token_after_backfill");
+        _setUpBaseTokenForFinalize(baseTokenAssetId);
+        _setNeedBaseTokenBackfill(false);
+        _mockBaseTokenTotalSupply(1000);
+
+        uint256 depositsBefore = _readTotalSuccessfulDepositsFromL1(baseTokenAssetId);
+
+        vm.prank(L2_BASE_TOKEN_HOLDER_ADDR);
+        L2_ASSET_TRACKER.handleFinalizeBaseTokenBridgingOnL2(_BASE_FINALIZE_L1_CHAIN_ID, _BASE_FINALIZE_AMOUNT);
+
+        assertEq(
+            _readTotalSuccessfulDepositsFromL1(baseTokenAssetId) - depositsBefore,
+            _BASE_FINALIZE_AMOUNT,
+            "deposit accounting should be updated after backfill"
+        );
+        assertEq(
+            L2AssetTracker(L2_ASSET_TRACKER_ADDR).assetMigrationNumber(block.chainid, baseTokenAssetId),
+            0,
+            "non-zero supply must not force-set the migration number"
+        );
+    }
+
+    /// @notice Sanity check that the `totalSupply() == 0` proxy is still honored once the supply
+    ///         is readable (no backfill pending): a zero supply force-sets the migration number.
+    ///         This guards against the fix accidentally disabling the normal force-set path.
+    function test_handleFinalizeBaseTokenBridgingOnL2_zeroSupplyForceSetsMigrationNumber() public {
+        bytes32 baseTokenAssetId = keccak256("base_token_zero_supply_force_set");
+        _setUpBaseTokenForFinalize(baseTokenAssetId);
+        _setNeedBaseTokenBackfill(false);
+        _mockBaseTokenTotalSupply(0);
+
+        vm.prank(L2_BASE_TOKEN_HOLDER_ADDR);
+        L2_ASSET_TRACKER.handleFinalizeBaseTokenBridgingOnL2(_BASE_FINALIZE_L1_CHAIN_ID, _BASE_FINALIZE_AMOUNT);
+
+        assertEq(
+            L2AssetTracker(L2_ASSET_TRACKER_ADDR).assetMigrationNumber(block.chainid, baseTokenAssetId),
+            _CHAIN_MIGRATION_NUMBER,
+            "zero supply should force-set the migration number to the chain migration number"
+        );
     }
 }
