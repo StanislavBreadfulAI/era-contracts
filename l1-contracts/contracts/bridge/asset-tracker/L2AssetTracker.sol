@@ -478,6 +478,17 @@ contract L2AssetTracker is AssetTrackerBase, IL2AssetTracker {
             return false;
         }
 
+        // For the base token of a ZKsync OS chain that upgraded from a pre-v31 version, the live
+        // `totalSupply()` is not available until it has been backfilled via
+        // `backFillZKSyncOSBaseTokenV31MigrationData()` — calling it beforehand would revert
+        // (see `L2BaseTokenZKOS.totalSupply()`). Such chains were already running before v31, so
+        // their base token always has a non-zero supply and the migration number must never be
+        // force-set. Returning `false` here therefore matches what the `totalSupply() == 0` proxy
+        // would yield once the value becomes readable, while avoiding the revert.
+        if (_assetId == BASE_TOKEN_ASSET_ID && needBaseTokenTotalSupplyBackfill) {
+            return false;
+        }
+
         // This works uniformly for both base tokens and ERC20 tokens because the asset tracker
         // is always notified before totalSupply changes.
         return IERC20(_tokenAddress).totalSupply() == 0;
