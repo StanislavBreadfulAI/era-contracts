@@ -1,0 +1,14 @@
+{
+  "eraCtm": "0x8b448ac7cd0f18F3d8464E2645575772a26A3b6b",
+  "oldProtocolVersion": 124554051588,
+  "oldProtocolVersionDeadline": 0,
+  "newProtocolVersion": 133143986176,
+  "verifier": "0xF9a241A3821BEBE1324FBBC79A3aD60efdfF6ACe",
+  "genesisUpgrade": "0x42576CE8a87C02Fc6F0c34b8900D34f61f2B80df",
+  "l1ChainId": 11155111,
+  "eraChainId": 270,
+  "alreadyUpgradedChains": [
+    6475,
+    499
+  ]
+}
