@@ -107,37 +107,44 @@ forge script deploy-scripts/upgrade/v31/PatchZkosCtmAssetTracker.s.sol --ffi --s
 > a different toolchain emits different solc metadata and the deployed-bytecode
 > hashes would not match `AllContractsHashes.json`.
 
-### 2. TypeScript — `scripts/patch-zkos-ctm-asset-tracker.ts` (hashes-only, byte-level)
+### 2. TypeScript — `scripts/patch-zkos-ctm-asset-tracker.ts` (hashes-only, on-chain verifier)
 
-Produces the same blobs but **never touches the bytecode**. It decodes the
-existing chain-creation params / upgrade data, enumerates every embedded
-descriptor (all ten `FixedForceDeploymentsData` slots + the v31 delegate),
-compares each to `AllContractsHashes.json`, and byte-patches the ones that differ
-(descriptor + the matching `factoryDeps` keccak, plus the recomputed v31 delegate
-address). It then re-derives the same `ChainTypeManager` calls (pure ABI
-encoding, no bytecode) and double-checks that:
+**Checks** the proposal the forge script produced — it does not regenerate it,
+**never touches bytecode**, and **does not trust the prepared ecosystem outputs
+for data**. It:
 
-- every stale descriptor / keccak / delegate address has been replaced, and
-- every bytecode reference in the patched data resolves to a hash present in
-  `AllContractsHashes.json` (so no changed contract was missed).
+1. reads ONLY the ZKsync OS CTM address from the ecosystem output, then pulls the
+   _original_ chain-creation params / upgrade cut straight from the CTM's own
+   on-chain events (`NewChainCreationParams`, `NewUpgradeCutData`,
+   `NewProtocolVersion` — scanned backwards in 10k-block windows);
+2. enumerates every embedded descriptor of those on-chain originals (the ten
+   `FixedForceDeploymentsData` slots + the v31 delegate), compares each to
+   `AllContractsHashes.json`, and — via a high-level byte substitution (take every
+   substring that should have changed and replace it) — asserts the proposal's
+   `force_deployments_data` / `chain_upgrade_diamond_cut` are the on-chain
+   originals with **only** those descriptors swapped (and `diamond_cut_data`
+   byte-identical to on-chain);
+3. asserts the `ChainTypeManager` calls are correctly constructed:
+   `setChainCreationParams` carries the on-chain params with only
+   `forceDeploymentsData` swapped, `setUpgradeDiamondCut` carries the patched cut
+   at the on-chain old protocol version, both target the CTM, and
+   `governance_calls` bundles exactly those two.
 
 ```bash
 cd l1-contracts
-npx ts-node scripts/patch-zkos-ctm-asset-tracker.ts
+L1_RPC=$TENDERLY_SEPOLIA npx ts-node scripts/patch-zkos-ctm-asset-tracker.ts
 ```
 
-Output: `script-out/zkos-ctm-asset-tracker-patch.ts.json` (used by the reproduce
-script to diff against the forge proposal).
-
-Environment overrides: `ECOSYSTEM_TOML`, `HASHES_JSON` (TS only), `PATCH_OUTPUT`,
-`BROADCAST` (forge only).
+Environment overrides: `L1_RPC` (or `TENDERLY_SEPOLIA`), `ECOSYSTEM_TOML` (CTM
+address only), `HASHES_JSON`, `PATCH_TOML`.
 
 ## The generated calls
 
 The patch is applied by a new governance proposal that calls the
 `ChainTypeManager` (the original proposal already advanced the on-chain protocol
-version, so it must not be re-run). Both scripts emit, in the same `Call` /
-`abi.encode(Call[])` format the CTM upgrade scripts use:
+version, so it must not be re-run). The forge script emits — and the TypeScript
+verifier checks — in the same `Call` / `abi.encode(Call[])` format the CTM
+upgrade scripts use:
 
 | Call                                 | Method                                                     | Fixes                                |
 | ------------------------------------ | ---------------------------------------------------------- | ------------------------------------ |
@@ -157,23 +164,26 @@ plus the permissionless `publish_bytecodes_calldata`
 > `upgradeCutHash[oldProtocolVersion]` in place without touching the version — the
 > correct primitive for patching an already-applied upgrade.
 
-`ChainCreationParams` reuses the prepared diamond cut verbatim (facets unchanged)
-and the ZKsyncOS genesis fields from `configs/genesis/zksync-os/latest.json`
-(`genesisRoot`, unit batch commitment, zero repeated-storage index — matching
-`ChainCreationParamsLib`), swapping in only the regenerated `forceDeploymentsData`.
+In the forge script, `ChainCreationParams` reuses the prepared diamond cut
+verbatim (facets unchanged) and the ZKsyncOS genesis fields from
+`configs/genesis/zksync-os/latest.json` (`genesisRoot`, unit batch commitment,
+zero repeated-storage index — matching `ChainCreationParamsLib`), swapping in only
+the regenerated `forceDeploymentsData`. The TypeScript verifier independently
+confirms those same fields against the on-chain `NewChainCreationParams` event.
 
-## Verifying the two scripts match
+## How the two scripts corroborate each other
 
-The forge script reconstructs the data from the **real bytecode**; the TS script
-byte-patches it from **`AllContractsHashes.json`**. The two approaches are
-independent, so identical output (both the regenerated data **and** the encoded
-`ChainTypeManager` calls) proves three things at once: the hashes file is
-consistent with the artifacts, the reconstruction matches the original generation
-logic, and the patch is complete (no affected contract was missed). Reproduce
-end-to-end with:
+The forge script reconstructs the proposal from the **real compiled bytecode**;
+the TypeScript verifier independently checks it against the **on-chain CTM state**
+(the original data, via events) using **only `AllContractsHashes.json`** for the
+new hashes. They share no inputs other than the hashes file and the CTM address,
+so a green verifier proves the proposal touches nothing but the changed bytecode
+descriptors, references only current hashes, and wires up the `ChainTypeManager`
+calls correctly. Reproduce + verify end-to-end with:
 
 ```bash
 cd l1-contracts
-./scripts/patch-zkos-ctm-asset-tracker.reproduce.sh        # builds, runs both, diffs
-SKIP_BUILD=1 ./scripts/patch-zkos-ctm-asset-tracker.reproduce.sh   # reuse artifacts
+# requires foundry-zksync v0.1.5 on PATH and L1_RPC / TENDERLY_SEPOLIA set
+./scripts/patch-zkos-ctm-asset-tracker.reproduce.sh               # build, generate, verify
+SKIP_BUILD=1 ./scripts/patch-zkos-ctm-asset-tracker.reproduce.sh  # reuse artifacts
 ```

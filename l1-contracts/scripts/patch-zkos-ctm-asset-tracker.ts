@@ -1,30 +1,23 @@
 // SPDX-License-Identifier: MIT
 //
-// Patch (hashes-only) for the ZKsync OS chain type manager (CTM) upgrade data,
-// motivated by https://github.com/matter-labs/era-contracts/pull/2224.
+// Verifier (hashes-only, on-chain-sourced) for the ZKsync OS CTM patch proposal
+// produced by `PatchZkosCtmAssetTracker.s.sol`, motivated by
+// https://github.com/matter-labs/era-contracts/pull/2224.
 //
-// PR #2224 changed the bytecode of `L2AssetTracker` (and, transitively, a few
-// other contracts). The already-prepared v31 upgrade artifacts therefore embed
-// stale ZKsync-OS bytecode descriptors for the ZKsync OS CTM. This script
-// regenerates the affected CTM data (`force_deployments_data` and
-// `chain_upgrade_diamond_cut`) for the ZKsync OS CTM ONLY.
+// The forge script writes a dedicated patch proposal
+// (`zkos-asset-tracker-patch.toml`). This script CHECKS that proposal. It never
+// touches bytecode and never trusts the prepared ecosystem outputs for data:
 //
-// Unlike the forge counterpart (`PatchZkosCtmAssetTracker.s.sol`), which
-// reconstructs the data from scratch out of the real compiled bytecode, this
-// script NEVER touches the bytecode. It:
-//   1. decodes the existing chain-creation params / upgrade data,
-//   2. enumerates EVERY contract whose bytecode descriptor is embedded there
-//      (all `FixedForceDeploymentsData` slots + the v31 upgrade delegate),
-//   3. for each, rewrites the descriptor to the NEW hashes taken purely from
-//      `AllContractsHashes.json` whenever it differs from the embedded one
-//      (so any affected contract is updated, not just a hard-coded pair),
-//   4. double-checks that every stale reference has been replaced and that the
-//      patched data only references bytecodes whose hashes are present in
-//      `AllContractsHashes.json`.
-//
-// The produced blobs are byte-for-byte identical to the ones reconstructed by
-// the forge script, so running both and diffing the outputs validates that
-// `AllContractsHashes.json` is consistent with the actual artifacts.
+//   1. it reads ONLY the ZKsync OS ChainTypeManager (CTM) address from the
+//      ecosystem output, then queries the *original* on-chain data from the CTM's
+//      own events (`NewChainCreationParams`, `NewUpgradeCutData`, `NewProtocolVersion`);
+//   2. it asserts the patched chain-creation params / upgrade data differ from
+//      the on-chain originals ONLY in the bytecode-descriptor substrings that
+//      `AllContractsHashes.json` says changed (a high-level byte substitution:
+//      take every substring that should have changed and replace it, then compare);
+//   3. it asserts the ChainTypeManager calls in the proposal were constructed
+//      correctly (`setChainCreationParams` + `setUpgradeDiamondCut`, right
+//      target / args / old protocol version, bundled as `Call[]`).
 
 import { ethers } from "ethers";
 import * as fs from "fs";
@@ -38,10 +31,10 @@ const abi = ethers.utils.defaultAbiCoder;
 // ---------------------------------------------------------------------------
 
 // `FixedForceDeploymentsData` bytecode-info slots → the contract whose ZKsync OS
-// deployed bytecode they describe. Resolution mirrors
-// `CoreOnGatewayHelper._resolveContractName(isZKsyncOS=true, ...)`. Each slot is
+// deployed bytecode they describe (mirrors
+// `CoreOnGatewayHelper._resolveContractName(isZKsyncOS=true, ...)`). Each slot is
 // `abi.encode(implInfo, proxyInfo)`; only the implementation is the contract
-// below (the proxy is the shared `SystemContractProxy`, untouched here).
+// below (the proxy is the shared `SystemContractProxy`).
 const FFD_SLOT_CONTRACTS: Array<{ field: string; contract: string }> = [
   { field: "bridgehubBytecodeInfo", contract: "l1-contracts/L2Bridgehub" },
   { field: "l2AssetRouterBytecodeInfo", contract: "l1-contracts/L2AssetRouter" },
@@ -55,11 +48,9 @@ const FFD_SLOT_CONTRACTS: Array<{ field: string; contract: string }> = [
   { field: "baseTokenHolderBytecodeInfo", contract: "l1-contracts/BaseTokenHolder" },
 ];
 
-// The v31 upgrade delegate, force-deployed via the single
-// `ZKsyncOSUnsafeForceDeployment` entry in the upgrade transaction.
 const V31_UPGRADE_CONTRACT = "l1-contracts/L2V31Upgrade";
 
-// `ContractUpgradeType` enum (contracts/state-transition/l2-deps/IComplexUpgrader.sol)
+// `ContractUpgradeType.ZKsyncOSUnsafeForceDeployment`.
 const UPGRADE_TYPE_ZKSYNCOS_UNSAFE_FORCE_DEPLOYMENT = 2;
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
@@ -68,7 +59,10 @@ const DEFAULT_ECOSYSTEM = path.join(
   REPO_ROOT,
   "l1-contracts/upgrade-envs/v0.31.0-interopB/output/stage/ecosystem.toml"
 );
-const DEFAULT_OUTPUT = path.join(REPO_ROOT, "l1-contracts/script-out/zkos-ctm-asset-tracker-patch.ts.json");
+const DEFAULT_PATCH = path.join(
+  REPO_ROOT,
+  "l1-contracts/upgrade-envs/v0.31.0-interopB/output/stage/zkos-asset-tracker-patch.toml"
+);
 
 // ---------------------------------------------------------------------------
 // ABI type descriptors (encoding-only, no contract ABIs are declared)
@@ -76,16 +70,6 @@ const DEFAULT_OUTPUT = path.join(REPO_ROOT, "l1-contracts/script-out/zkos-ctm-as
 
 const DIAMOND_CUT_DATA =
   "tuple(tuple(address facet,uint8 action,bool isFreezable,bytes4[] selectors)[] facetCuts,address initAddress,bytes initCalldata)";
-
-const L2_CANONICAL_TX =
-  "tuple(uint256 txType,uint256 from,uint256 to,uint256 gasLimit,uint256 gasPerPubdataByteLimit,uint256 maxFeePerGas," +
-  "uint256 maxPriorityFeePerGas,uint256 paymaster,uint256 nonce,uint256 value,uint256[4] reserved,bytes data,bytes signature," +
-  "uint256[] factoryDeps,bytes paymasterInput,bytes reservedDynamic)";
-
-const PROPOSED_UPGRADE =
-  `tuple(${L2_CANONICAL_TX} l2ProtocolUpgradeTx,bytes32 bootloaderHash,bytes32 defaultAccountHash,bytes32 evmEmulatorHash,` +
-  "address verifier,tuple(bytes32 recursionNodeLevelVkHash,bytes32 recursionLeafLevelVkHash,bytes32 recursionCircuitsSetVksHash) verifierParams," +
-  "bytes l1ContractsUpgradeCalldata,bytes postUpgradeCalldata,uint256 upgradeTimestamp,uint256 newProtocolVersion)";
 
 const FIXED_FORCE_DEPLOYMENTS_DATA =
   "tuple(uint256 l1ChainId,uint256 gatewayChainId,uint256 eraChainId,address l1AssetRouter,bytes32 l2TokenProxyBytecodeHash," +
@@ -97,33 +81,48 @@ const FIXED_FORCE_DEPLOYMENTS_DATA =
 
 const UNIVERSAL_CONTRACT_UPGRADE_INFO = "tuple(uint8 upgradeType,bytes deployedBytecodeInfo,address newAddress)";
 
-// ChainCreationParams (contracts/state-transition/IChainTypeManager.sol).
 const CHAIN_CREATION_PARAMS =
   "tuple(address genesisUpgrade,bytes32 genesisBatchHash,uint64 genesisIndexRepeatedStorageChanges," +
   `bytes32 genesisBatchCommitment,${DIAMOND_CUT_DATA} diamondCut,bytes forceDeploymentsData)`;
 
-// governance Call (contracts/governance/Common.sol).
 const CALL = "tuple(address target,uint256 value,bytes data)";
 
-// Canonical (un-named) signatures used to derive the 4-byte selectors.
-const SIG_SET_CHAIN_CREATION_PARAMS =
-  "setChainCreationParams((address,bytes32,uint64,bytes32,((address,uint8,bool,bytes4[])[],address,bytes),bytes))";
-const SIG_SET_UPGRADE_DIAMOND_CUT = "setUpgradeDiamondCut(((address,uint8,bool,bytes4[])[],address,bytes),uint256)";
+// `NewChainCreationParams` (un-indexed) event payload.
+const NEW_CHAIN_CREATION_PARAMS_EVENT = [
+  "address",
+  "bytes32",
+  "uint64",
+  "bytes32",
+  DIAMOND_CUT_DATA,
+  "bytes32",
+  "bytes",
+  "bytes32",
+];
 
 function selector(sig: string): string {
   return ethers.utils.id(sig).slice(0, 10);
 }
 
+const SIG_SET_CHAIN_CREATION_PARAMS =
+  "setChainCreationParams((address,bytes32,uint64,bytes32,((address,uint8,bool,bytes4[])[],address,bytes),bytes))";
+const SIG_SET_UPGRADE_DIAMOND_CUT = "setUpgradeDiamondCut(((address,uint8,bool,bytes4[])[],address,bytes),uint256)";
+
+const TOPIC_NEW_CHAIN_CREATION_PARAMS = ethers.utils.id(
+  "NewChainCreationParams(address,bytes32,uint64,bytes32,((address,uint8,bool,bytes4[])[],address,bytes),bytes32,bytes,bytes32)"
+);
+const TOPIC_NEW_UPGRADE_CUT_DATA = ethers.utils.id(
+  "NewUpgradeCutData(uint256,((address,uint8,bool,bytes4[])[],address,bytes))"
+);
+const TOPIC_NEW_PROTOCOL_VERSION = ethers.utils.id("NewProtocolVersion(uint256,uint256)");
+
 // ---------------------------------------------------------------------------
 // Bytecode descriptors
 // ---------------------------------------------------------------------------
 
-// A ZKsync OS bytecode descriptor: abi.encode(bytes32 blake2s, uint32 length, bytes32 keccak).
-// See contracts/common/libraries/ZKSyncOSBytecodeInfo.sol.
 interface ZkosBytecodeInfo {
-  blake: string; // 0x-prefixed bytes32
+  blake: string;
   length: number;
-  keccak: string; // 0x-prefixed bytes32
+  keccak: string;
 }
 
 function decodeZkosBytecodeInfo(infoHex: string): ZkosBytecodeInfo {
@@ -135,11 +134,9 @@ function encodeZkosBytecodeInfo(info: ZkosBytecodeInfo): string {
   return abi.encode(["bytes32", "uint32", "bytes32"], [info.blake, info.length, info.keccak]);
 }
 
-// `generateRandomAddress` from contracts/l2-upgrades/L2GenesisForceDeploymentsHelper.sol:
-// address(uint160(uint256(keccak256(bytes.concat(bytes32(0), bytecodeInfo))))).
+// `generateRandomAddress` (contracts/l2-upgrades/L2GenesisForceDeploymentsHelper.sol).
 function generateRandomAddress(bytecodeInfoHex: string): string {
-  const packed = ethers.utils.hexConcat([ethers.constants.HashZero, bytecodeInfoHex]);
-  const hash = ethers.utils.keccak256(packed);
+  const hash = ethers.utils.keccak256(ethers.utils.hexConcat([ethers.constants.HashZero, bytecodeInfoHex]));
   return ethers.utils.getAddress("0x" + hash.slice(-40));
 }
 
@@ -171,14 +168,9 @@ interface HashEntry {
 
 function loadHashes(filePath: string): Map<string, HashEntry> {
   const arr: HashEntry[] = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  const map = new Map<string, HashEntry>();
-  for (const e of arr) {
-    map.set(e.contractName, e);
-  }
-  return map;
+  return new Map(arr.map((e) => [e.contractName, e]));
 }
 
-// Every keccak hash referenced by the patched data must resolve to one of these.
 function allKnownKeccaks(hashes: Map<string, HashEntry>): Set<string> {
   const set = new Set<string>();
   for (const e of hashes.values()) {
@@ -190,181 +182,70 @@ function allKnownKeccaks(hashes: Map<string, HashEntry>): Set<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Hex helpers (byte-accurate, layout-preserving substitution)
+// Hex helpers
 // ---------------------------------------------------------------------------
 
 function strip0x(s: string): string {
   return s.toLowerCase().replace(/^0x/, "");
 }
 
-function countOccurrences(haystack: string, needle: string): number {
-  let count = 0;
-  let idx = haystack.indexOf(needle);
-  while (idx !== -1) {
-    count++;
-    idx = haystack.indexOf(needle, idx + needle.length);
-  }
-  return count;
+function eqHex(a: string, b: string): boolean {
+  return strip0x(a) === strip0x(b);
 }
 
-// Replaces every occurrence of `oldHex` with `newHex` (equal length) in a
-// 0x-prefixed blob, returning the new blob and the number of replacements.
-// Equal lengths keep every ABI offset intact (only descriptor contents change).
-function replaceAll(blobHex: string, oldHex: string, newHex: string): { blob: string; count: number } {
-  if (oldHex.length !== newHex.length) {
-    throw new Error("substitution length mismatch (layout would break)");
-  }
-  const body = strip0x(blobHex);
-  const count = countOccurrences(body, oldHex);
-  return { blob: "0x" + body.split(oldHex).join(newHex), count };
+function assert(cond: boolean, msg: string): void {
+  if (!cond) throw new Error(`CHECK FAILED: ${msg}`);
 }
 
 // ---------------------------------------------------------------------------
-// Structural decoding of the ZKsync OS CTM data
+// Structural decoding (to locate descriptors that should have changed)
 // ---------------------------------------------------------------------------
 
-// Returns the implementation descriptor stored in a `FixedForceDeploymentsData`
-// bytecode-info slot (each slot is abi.encode(implInfo, proxyInfo)).
 function readFfdSlotImplInfo(ffdHex: string, field: string): ZkosBytecodeInfo {
   const [ffd] = abi.decode([FIXED_FORCE_DEPLOYMENTS_DATA], ffdHex);
   const [implInfo] = abi.decode(["bytes", "bytes"], ffd[field]);
   return decodeZkosBytecodeInfo(implInfo);
 }
 
-interface UpgradeCutParts {
-  deployments: Array<{ upgradeType: number; deployedBytecodeInfo: string; newAddress: string }>;
-  delegateTo: string;
-  innerForceDeploymentsData: string;
-  factoryDeps: string[]; // 0x-prefixed bytes32 keccak hashes
-}
-
-function decodeUpgradeCut(chainUpgradeDiamondCutHex: string): UpgradeCutParts {
+function findV31DelegateInfo(chainUpgradeDiamondCutHex: string): ZkosBytecodeInfo {
   const [dcd] = abi.decode([DIAMOND_CUT_DATA], chainUpgradeDiamondCutHex);
-  // initCalldata = DefaultUpgrade.upgrade(ProposedUpgrade) -> strip 4-byte selector.
-  const [proposedUpgrade] = abi.decode([PROPOSED_UPGRADE], "0x" + strip0x(dcd.initCalldata).slice(8));
-  const tx = proposedUpgrade.l2ProtocolUpgradeTx;
-  const factoryDeps: string[] = tx.factoryDeps.map((d: ethers.BigNumber) =>
-    ethers.utils.hexZeroPad(d.toHexString(), 32)
-  );
-  // tx.data = forceDeployAndUpgradeUniversal(deployments, delegateTo, innerCalldata).
-  const txDataBody = "0x" + strip0x(tx.data).slice(8);
-  const [deploymentsRaw, delegateTo, inner] = abi.decode(
+  // initCalldata = DefaultUpgrade.upgrade(ProposedUpgrade); the L2 tx `data`
+  // (forceDeployAndUpgradeUniversal) is nested — locate the single
+  // ZKsyncOSUnsafeForceDeployment entry inside it.
+  const initCalldata: string = dcd.initCalldata;
+  const PROPOSED_UPGRADE =
+    "tuple(tuple(uint256 txType,uint256 from,uint256 to,uint256 gasLimit,uint256 gasPerPubdataByteLimit," +
+    "uint256 maxFeePerGas,uint256 maxPriorityFeePerGas,uint256 paymaster,uint256 nonce,uint256 value,uint256[4] reserved," +
+    "bytes data,bytes signature,uint256[] factoryDeps,bytes paymasterInput,bytes reservedDynamic) l2ProtocolUpgradeTx," +
+    "bytes32 bootloaderHash,bytes32 defaultAccountHash,bytes32 evmEmulatorHash,address verifier," +
+    "tuple(bytes32 a,bytes32 b,bytes32 c) verifierParams,bytes l1ContractsUpgradeCalldata,bytes postUpgradeCalldata," +
+    "uint256 upgradeTimestamp,uint256 newProtocolVersion)";
+  const [proposed] = abi.decode([PROPOSED_UPGRADE], "0x" + strip0x(initCalldata).slice(8));
+  const [deployments] = abi.decode(
     [`${UNIVERSAL_CONTRACT_UPGRADE_INFO}[]`, "address", "bytes"],
-    txDataBody
+    "0x" + strip0x(proposed.l2ProtocolUpgradeTx.data).slice(8)
   );
-  const deployments = deploymentsRaw.map(
-    (d: { upgradeType: number; deployedBytecodeInfo: string; newAddress: string }) => ({
-      upgradeType: Number(d.upgradeType),
-      deployedBytecodeInfo: d.deployedBytecodeInfo,
-      newAddress: d.newAddress,
-    })
+  const unsafe = deployments.filter(
+    (d: { upgradeType: number }) => Number(d.upgradeType) === UPGRADE_TYPE_ZKSYNCOS_UNSAFE_FORCE_DEPLOYMENT
   );
-  // inner = IL2V31Upgrade.upgrade(bool, address, bytes forceDeploymentsData, bytes) -> strip selector.
-  const [, , innerForceDeploymentsData] = abi.decode(
-    ["bool", "address", "bytes", "bytes"],
-    "0x" + strip0x(inner).slice(8)
-  );
-  return { deployments, delegateTo, innerForceDeploymentsData, factoryDeps };
-}
-
-function findV31DelegateInfo(parts: UpgradeCutParts): ZkosBytecodeInfo {
-  const unsafe = parts.deployments.filter((d) => d.upgradeType === UPGRADE_TYPE_ZKSYNCOS_UNSAFE_FORCE_DEPLOYMENT);
-  if (unsafe.length !== 1) {
-    throw new Error(`Expected exactly one ZKsyncOSUnsafeForceDeployment (v31 delegate), found ${unsafe.length}`);
-  }
+  assert(unsafe.length === 1, `expected one ZKsyncOSUnsafeForceDeployment, found ${unsafe.length}`);
   return decodeZkosBytecodeInfo(unsafe[0].deployedBytecodeInfo);
 }
 
-// Collect every keccak hash referenced by a force-deployments blob (each
-// `*BytecodeInfo` may be a single descriptor or an abi.encode(impl, proxy) pair).
+// Every keccak referenced by the patched data must resolve to a current hash.
 function collectFfdKeccaks(ffdHex: string): string[] {
   const [ffd] = abi.decode([FIXED_FORCE_DEPLOYMENTS_DATA], ffdHex);
   const keccaks: string[] = [];
   for (const { field } of FFD_SLOT_CONTRACTS) {
-    const value: string = ffd[field];
-    if (!value || strip0x(value).length === 0) continue;
-    const [implInfo, proxyInfo] = abi.decode(["bytes", "bytes"], value);
+    const [implInfo, proxyInfo] = abi.decode(["bytes", "bytes"], ffd[field]);
     keccaks.push(decodeZkosBytecodeInfo(implInfo).keccak.toLowerCase());
     keccaks.push(decodeZkosBytecodeInfo(proxyInfo).keccak.toLowerCase());
   }
   return keccaks;
 }
 
-// Collect every keccak hash referenced by the upgrade-cut blob.
-function collectUpgradeCutKeccaks(chainUpgradeDiamondCutHex: string): string[] {
-  const parts = decodeUpgradeCut(chainUpgradeDiamondCutHex);
-  const keccaks: string[] = [];
-  for (const dep of parts.deployments) {
-    if (dep.upgradeType === UPGRADE_TYPE_ZKSYNCOS_UNSAFE_FORCE_DEPLOYMENT) {
-      keccaks.push(decodeZkosBytecodeInfo(dep.deployedBytecodeInfo).keccak.toLowerCase());
-    } else {
-      const [implInfo, proxyInfo] = abi.decode(["bytes", "bytes"], dep.deployedBytecodeInfo);
-      keccaks.push(decodeZkosBytecodeInfo(implInfo).keccak.toLowerCase());
-      keccaks.push(decodeZkosBytecodeInfo(proxyInfo).keccak.toLowerCase());
-    }
-  }
-  for (const fd of parts.factoryDeps) {
-    keccaks.push(fd.toLowerCase());
-  }
-  keccaks.push(...collectFfdKeccaks(parts.innerForceDeploymentsData));
-  return keccaks;
-}
-
-// Assert that every keccak referenced by the patched data resolves to a hash in
-// AllContractsHashes.json. This is the strong "no stale reference left behind"
-// completeness check: any contract whose bytecode changed but was missed would
-// leave a keccak that is absent from the current hashes file.
-function assertNoStaleReferences(label: string, keccaks: string[], known: Set<string>): void {
-  const stale = keccaks.filter((k) => !known.has(k));
-  if (stale.length > 0) {
-    throw new Error(
-      `${label}: ${stale.length} stale bytecode reference(s) not present in AllContractsHashes.json: ${[
-        ...new Set(stale),
-      ].join(", ")}`
-    );
-  }
-}
-
 // ---------------------------------------------------------------------------
-// TOML helpers
-// ---------------------------------------------------------------------------
-
-interface Ecosystem {
-  forceDeploymentsData: string;
-  chainUpgradeDiamondCut: string;
-  diamondCutData: string;
-  chainTypeManager: string;
-  genesisUpgrade: string;
-  oldProtocolVersion: string;
-  newProtocolVersion: string;
-}
-
-function readEcosystem(filePath: string): Ecosystem {
-  const parsed = toml.parse(fs.readFileSync(filePath, "utf8"));
-  const zk = parsed?.ctms?.zksync_os;
-  if (!zk) {
-    throw new Error("ecosystem.toml has no [ctms.zksync_os] section");
-  }
-  return {
-    forceDeploymentsData: zk.contracts_config.force_deployments_data,
-    chainUpgradeDiamondCut: zk.chain_upgrade_diamond_cut,
-    diamondCutData: zk.contracts_config.diamond_cut_data,
-    chainTypeManager: zk.state_transition.chain_type_manager_proxy,
-    genesisUpgrade: zk.state_transition.genesis_upgrade_addr,
-    oldProtocolVersion: String(zk.contracts_config.old_protocol_version),
-    newProtocolVersion: String(zk.contracts_config.new_protocol_version),
-  };
-}
-
-// `$.genesis_root` from the ZKsyncOS genesis config (a 32-byte state root, not
-// bytecode). Mirrors `ChainCreationParamsLib.getChainCreationParams(.., true)`.
-function readZksyncOsGenesisRoot(): string {
-  const cfg = path.join(REPO_ROOT, "configs/genesis/zksync-os/latest.json");
-  return JSON.parse(fs.readFileSync(cfg, "utf8")).genesis_root;
-}
-
-// ---------------------------------------------------------------------------
-// Main
+// Affected-contract detection + high-level byte substitution
 // ---------------------------------------------------------------------------
 
 interface Change {
@@ -374,197 +255,247 @@ interface Change {
   isV31: boolean;
 }
 
-function main() {
-  const hashesPath = process.env.HASHES_JSON || DEFAULT_HASHES;
-  const ecosystemPath = process.env.ECOSYSTEM_TOML || DEFAULT_ECOSYSTEM;
-  const outputPath = process.env.PATCH_OUTPUT || DEFAULT_OUTPUT;
-
-  console.log("Patching ZKsync OS CTM upgrade data (hashes-only, TS)");
-  console.log(`  hashes:     ${hashesPath}`);
-  console.log(`  ecosystem:  ${ecosystemPath}`);
-  console.log(`  output:     ${outputPath}`);
-
-  const hashes = loadHashes(hashesPath);
-  const known = allKnownKeccaks(hashes);
-  const eco = readEcosystem(ecosystemPath);
-
-  // --- detect every contract whose embedded descriptor differs from the hashes ---
+// Compare every embedded descriptor (FFD slots + v31 delegate) of the ORIGINAL
+// on-chain data against AllContractsHashes.json; whatever differs is a change.
+function detectChanges(origFfd: string, origCut: string, hashes: Map<string, HashEntry>): Change[] {
   const changes: Change[] = [];
-  const requireEntry = (contract: string): HashEntry => {
-    const e = hashes.get(contract);
-    if (!e) throw new Error(`${contract} not present in AllContractsHashes.json`);
-    return e;
-  };
-
-  // All FixedForceDeploymentsData slots.
   for (const { field, contract } of FFD_SLOT_CONTRACTS) {
-    const oldInfo = readFfdSlotImplInfo(eco.forceDeploymentsData, field);
-    const newInfo = infoFromHashesJson(requireEntry(contract));
+    const oldInfo = readFfdSlotImplInfo(origFfd, field);
+    const e = hashes.get(contract);
+    assert(!!e, `${contract} not present in AllContractsHashes.json`);
+    const newInfo = infoFromHashesJson(e!);
     if (encodeZkosBytecodeInfo(oldInfo) !== encodeZkosBytecodeInfo(newInfo)) {
       changes.push({ contract, old: oldInfo, nw: newInfo, isV31: false });
     }
   }
-
-  // The v31 upgrade delegate.
-  const upgradeParts = decodeUpgradeCut(eco.chainUpgradeDiamondCut);
-  {
-    const oldInfo = findV31DelegateInfo(upgradeParts);
-    const newInfo = infoFromHashesJson(requireEntry(V31_UPGRADE_CONTRACT));
-    if (encodeZkosBytecodeInfo(oldInfo) !== encodeZkosBytecodeInfo(newInfo)) {
-      changes.push({ contract: V31_UPGRADE_CONTRACT, old: oldInfo, nw: newInfo, isV31: true });
-    }
-    // Sanity: the asset tracker descriptor in the embedded force deployments data
-    // must match the standalone one.
-    const atField = FFD_SLOT_CONTRACTS.find((s) => s.contract === "l1-contracts/L2AssetTracker")!.field;
-    const a = readFfdSlotImplInfo(eco.forceDeploymentsData, atField);
-    const b = readFfdSlotImplInfo(upgradeParts.innerForceDeploymentsData, atField);
-    if (encodeZkosBytecodeInfo(a) !== encodeZkosBytecodeInfo(b)) {
-      throw new Error("Asset tracker descriptor differs between force-deployments data and upgrade cut");
-    }
+  const v31Old = findV31DelegateInfo(origCut);
+  const v31New = infoFromHashesJson(hashes.get(V31_UPGRADE_CONTRACT)!);
+  if (encodeZkosBytecodeInfo(v31Old) !== encodeZkosBytecodeInfo(v31New)) {
+    changes.push({ contract: V31_UPGRADE_CONTRACT, old: v31Old, nw: v31New, isV31: true });
   }
-
-  if (changes.length === 0) {
-    throw new Error("No affected descriptors found — input already patched, or no bytecode changed?");
-  }
-  console.log(`  detected ${changes.length} affected contract(s):`);
-  for (const c of changes) {
-    console.log(`    ${c.contract}: ${c.old.keccak} (len ${c.old.length}) -> ${c.nw.keccak} (len ${c.nw.length})`);
-  }
-
-  // --- v31 delegate address is derived from its descriptor ---
-  let delegateOld = "";
-  let delegateNew = "";
-  const v31 = changes.find((c) => c.isV31);
-  if (v31) {
-    delegateOld = generateRandomAddress(encodeZkosBytecodeInfo(v31.old));
-    delegateNew = generateRandomAddress(encodeZkosBytecodeInfo(v31.nw));
-    if (ethers.utils.getAddress(delegateOld) !== ethers.utils.getAddress(upgradeParts.delegateTo)) {
-      throw new Error("Recomputed old v31 delegate address does not match the decoded delegateTo");
-    }
-    console.log(`  v31 delegate ${delegateOld} -> ${delegateNew}`);
-  }
-
-  // --- apply the byte-level substitutions ---
-  // For every affected contract: replace the 96-byte descriptor first (so the
-  // keccak inside it is rewritten as part of the descriptor), then the standalone
-  // keccak hashes (factoryDeps). Finally, the derived v31 delegate address.
-  let forceDeploymentsDataNew = eco.forceDeploymentsData;
-  let chainUpgradeDiamondCutNew = eco.chainUpgradeDiamondCut;
-
-  const patchBlob = (blob: string, label: string): string => {
-    let out = blob;
-    for (const c of changes) {
-      const desc = replaceAll(out, strip0x(encodeZkosBytecodeInfo(c.old)), strip0x(encodeZkosBytecodeInfo(c.nw)));
-      out = desc.blob;
-      const kec = replaceAll(out, strip0x(c.old.keccak), strip0x(c.nw.keccak));
-      out = kec.blob;
-    }
-    if (label === "chain_upgrade_diamond_cut" && v31) {
-      const del = replaceAll(out, strip0x(delegateOld), strip0x(delegateNew));
-      if (del.count === 0) throw new Error("v31 delegate address not found in upgrade cut");
-      out = del.blob;
-    }
-    return out;
-  };
-
-  forceDeploymentsDataNew = patchBlob(forceDeploymentsDataNew, "force_deployments_data");
-  chainUpgradeDiamondCutNew = patchBlob(chainUpgradeDiamondCutNew, "chain_upgrade_diamond_cut");
-
-  // --- double-check the result ---
-  // 1. No old descriptor / keccak / blake / delegate address may survive.
-  for (const [label, blob] of [
-    ["force_deployments_data", forceDeploymentsDataNew],
-    ["chain_upgrade_diamond_cut", chainUpgradeDiamondCutNew],
-  ] as Array<[string, string]>) {
-    const body = strip0x(blob);
-    for (const c of changes) {
-      for (const stale of [strip0x(c.old.keccak), strip0x(c.old.blake)]) {
-        if (body.includes(stale)) {
-          throw new Error(`${label}: stale reference ${stale} (${c.contract}) still present after patching`);
-        }
-      }
-    }
-    if (delegateOld && body.includes(strip0x(delegateOld))) {
-      throw new Error(`${label}: stale v31 delegate ${delegateOld} still present after patching`);
-    }
-  }
-
-  // 2. Every bytecode reference in the patched data resolves to a current hash.
-  assertNoStaleReferences("force_deployments_data", collectFfdKeccaks(forceDeploymentsDataNew), known);
-  assertNoStaleReferences("chain_upgrade_diamond_cut", collectUpgradeCutKeccaks(chainUpgradeDiamondCutNew), known);
-
-  // 3. The chain-creation diamond cut embeds no such descriptor and is untouched.
-  const diamondCutBody = strip0x(eco.diamondCutData);
-  for (const c of changes) {
-    if (diamondCutBody.includes(strip0x(c.nw.keccak)) || diamondCutBody.includes(strip0x(c.old.keccak))) {
-      throw new Error(`diamond_cut_data unexpectedly references ${c.contract}`);
-    }
-  }
-
-  // --- generate the ChainTypeManager calls that apply the patch ---
-  // Mirrors the forge script: setChainCreationParams (chain-creation params,
-  // genesis fields from the ZKsyncOS genesis config, diamond cut reused verbatim)
-  // and setUpgradeDiamondCut (the patched upgrade cut for the old protocol
-  // version). `setNewVersionUpgrade` is intentionally NOT used: the original
-  // proposal already advanced the on-chain protocol version, so it would revert.
-  const diamondCut = abi.decode([DIAMOND_CUT_DATA], eco.diamondCutData)[0];
-  const upgradeCut = abi.decode([DIAMOND_CUT_DATA], chainUpgradeDiamondCutNew)[0];
-  const chainCreationParams = abi.encode(
-    [CHAIN_CREATION_PARAMS],
-    [
-      {
-        genesisUpgrade: eco.genesisUpgrade,
-        genesisBatchHash: readZksyncOsGenesisRoot(),
-        genesisIndexRepeatedStorageChanges: 0,
-        genesisBatchCommitment: ethers.utils.hexZeroPad("0x01", 32),
-        diamondCut,
-        forceDeploymentsData: forceDeploymentsDataNew,
-      },
-    ]
-  );
-
-  const setChainCreationParamsCalldata = selector(SIG_SET_CHAIN_CREATION_PARAMS) + strip0x(chainCreationParams);
-  const setUpgradeDiamondCutCalldata =
-    selector(SIG_SET_UPGRADE_DIAMOND_CUT) +
-    strip0x(abi.encode([DIAMOND_CUT_DATA, "uint256"], [upgradeCut, eco.oldProtocolVersion]));
-
-  const calls = [
-    { target: eco.chainTypeManager, value: 0, data: setChainCreationParamsCalldata },
-    { target: eco.chainTypeManager, value: 0, data: setUpgradeDiamondCutCalldata },
-  ];
-  const governanceCalls = abi.encode([`${CALL}[]`], [calls]);
-  console.log(`  generated ${calls.length} ChainTypeManager calls (setChainCreationParams, setUpgradeDiamondCut)`);
-
-  const out = {
-    source: {
-      hashes: path.relative(REPO_ROOT, hashesPath),
-      ecosystem: path.relative(REPO_ROOT, ecosystemPath),
-    },
-    ctm: "zksync_os",
-    chainTypeManager: ethers.utils.getAddress(eco.chainTypeManager),
-    oldProtocolVersion: eco.oldProtocolVersion,
-    newProtocolVersion: eco.newProtocolVersion,
-    changedContracts: changes.map((c) => ({
-      contract: c.contract,
-      oldKeccak: c.old.keccak,
-      newKeccak: c.nw.keccak,
-      oldLength: c.old.length,
-      newLength: c.nw.length,
-    })),
-    v31DelegateOld: delegateOld ? ethers.utils.getAddress(delegateOld) : null,
-    v31DelegateNew: delegateNew ? ethers.utils.getAddress(delegateNew) : null,
-    diamondCutData: eco.diamondCutData, // unchanged (facets untouched)
-    forceDeploymentsData: forceDeploymentsDataNew,
-    chainUpgradeDiamondCut: chainUpgradeDiamondCutNew,
-    chainCreationParams,
-    setChainCreationParamsCalldata,
-    setUpgradeDiamondCutCalldata,
-    governanceCalls,
-  };
-
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  fs.writeFileSync(outputPath, JSON.stringify(out, null, 2) + "\n");
-  console.log(`\nAll checks passed. Patch proposal written to:\n  ${outputPath}`);
+  return changes;
 }
 
-main();
+// Take the original blob and replace every substring that should have changed
+// (the 96-byte descriptor, the standalone keccak in factoryDeps, and — for the
+// v31 delegate — the derived `generateRandomAddress` address).
+function expectedPatched(origBlobHex: string, changes: Change[]): string {
+  let body = strip0x(origBlobHex);
+  for (const c of changes) {
+    body = body.split(strip0x(encodeZkosBytecodeInfo(c.old))).join(strip0x(encodeZkosBytecodeInfo(c.nw)));
+    body = body.split(strip0x(c.old.keccak)).join(strip0x(c.nw.keccak));
+    if (c.isV31) {
+      const delOld = generateRandomAddress(encodeZkosBytecodeInfo(c.old));
+      const delNew = generateRandomAddress(encodeZkosBytecodeInfo(c.nw));
+      body = body.split(strip0x(delOld)).join(strip0x(delNew));
+    }
+  }
+  return "0x" + body;
+}
+
+// ---------------------------------------------------------------------------
+// On-chain queries
+// ---------------------------------------------------------------------------
+
+const WINDOW = 10_000;
+const MAX_LOOKBACK = 5_000_000;
+
+// Scan backwards from `latest` in 10k-block windows; return the highest-block
+// log matching `topics`, or throw. (Per repo guidance we never scan from 0.)
+async function latestLog(
+  provider: ethers.providers.Provider,
+  address: string,
+  topics: Array<string | null>
+): Promise<ethers.providers.Log> {
+  const latest = await provider.getBlockNumber();
+  const floor = Math.max(0, latest - MAX_LOOKBACK);
+  for (let to = latest; to >= floor; to -= WINDOW) {
+    const from = Math.max(floor, to - WINDOW + 1);
+    const logs = await provider.getLogs({ address, topics, fromBlock: from, toBlock: to });
+    if (logs.length > 0) return logs[logs.length - 1];
+  }
+  throw new Error(`no log with topic ${topics[0]} on ${address} in the last ${MAX_LOOKBACK} blocks`);
+}
+
+interface OnChainOriginal {
+  protocolVersion: ethers.BigNumber;
+  oldProtocolVersion: ethers.BigNumber;
+  genesisUpgrade: string;
+  genesisBatchHash: string;
+  genesisIndexRepeatedStorageChanges: ethers.BigNumber;
+  genesisBatchCommitment: string;
+  diamondCut: unknown; // decoded DiamondCutData tuple
+  forceDeploymentsData: string;
+  upgradeCutData: string; // abi.encode(DiamondCutData), as emitted
+}
+
+async function fetchOnChainOriginal(provider: ethers.providers.Provider, ctm: string): Promise<OnChainOriginal> {
+  const protocolVersion = ethers.BigNumber.from(await provider.call({ to: ctm, data: selector("protocolVersion()") }));
+
+  // Latest protocol-version transition gives the (old -> new) versions.
+  const npv = await latestLog(provider, ctm, [TOPIC_NEW_PROTOCOL_VERSION]);
+  const oldProtocolVersion = ethers.BigNumber.from(npv.topics[1]);
+  const newProtocolVersion = ethers.BigNumber.from(npv.topics[2]);
+  assert(newProtocolVersion.eq(protocolVersion), "latest NewProtocolVersion.new != on-chain protocolVersion()");
+
+  // Current chain-creation params.
+  const ccpLog = await latestLog(provider, ctm, [TOPIC_NEW_CHAIN_CREATION_PARAMS]);
+  const ccp = abi.decode(NEW_CHAIN_CREATION_PARAMS_EVENT, ccpLog.data);
+
+  // The upgrade cut stored for the old protocol version (the one chains upgrade
+  // FROM). `NewUpgradeCutData`'s protocolVersion is indexed (topic1). The event
+  // payload is a single non-indexed DiamondCutData, so `log.data` is exactly
+  // abi.encode(DiamondCutData) — the same encoding as `chain_upgrade_diamond_cut`.
+  const cutLog = await latestLog(provider, ctm, [
+    TOPIC_NEW_UPGRADE_CUT_DATA,
+    ethers.utils.hexZeroPad(oldProtocolVersion.toHexString(), 32),
+  ]);
+
+  return {
+    protocolVersion,
+    oldProtocolVersion,
+    genesisUpgrade: ccp[0],
+    genesisBatchHash: ccp[1],
+    genesisIndexRepeatedStorageChanges: ethers.BigNumber.from(ccp[2]),
+    genesisBatchCommitment: ccp[3],
+    diamondCut: ccp[4],
+    forceDeploymentsData: ccp[6],
+    upgradeCutData: cutLog.data,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Patch proposal TOML
+// ---------------------------------------------------------------------------
+
+function readPatch(filePath: string) {
+  const zk = toml.parse(fs.readFileSync(filePath, "utf8")).zksync_os;
+  if (!zk) throw new Error(`${filePath} has no [zksync_os] table`);
+  return zk;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const hashesPath = process.env.HASHES_JSON || DEFAULT_HASHES;
+  const ecosystemPath = process.env.ECOSYSTEM_TOML || DEFAULT_ECOSYSTEM;
+  const patchPath = process.env.PATCH_TOML || DEFAULT_PATCH;
+  const rpcUrl = process.env.L1_RPC || process.env.TENDERLY_SEPOLIA;
+  if (!rpcUrl) throw new Error("Set L1_RPC (or TENDERLY_SEPOLIA) to the L1 RPC of the CTM's chain");
+
+  console.log("Verifying ZKsync OS CTM patch proposal (hashes-only, on-chain-sourced)");
+  console.log(`  hashes:     ${hashesPath}`);
+  console.log(`  ecosystem:  ${ecosystemPath} (CTM address only)`);
+  console.log(`  patch:      ${patchPath}`);
+
+  const hashes = loadHashes(hashesPath);
+  const known = allKnownKeccaks(hashes);
+
+  // ONLY the CTM address comes from the ecosystem output.
+  const ctm: string = toml.parse(fs.readFileSync(ecosystemPath, "utf8")).ctms.zksync_os.state_transition
+    .chain_type_manager_proxy;
+  console.log(`  ZKsync OS ChainTypeManager: ${ctm}`);
+
+  // Original data straight from the CTM's on-chain events.
+  const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  const orig = await fetchOnChainOriginal(provider, ctm);
+  console.log(`  on-chain protocolVersion: ${orig.protocolVersion} (old: ${orig.oldProtocolVersion})`);
+
+  const patch = readPatch(patchPath);
+  assert(
+    ethers.utils.getAddress(patch.chain_type_manager) === ethers.utils.getAddress(ctm),
+    "patch CTM != ecosystem CTM"
+  );
+
+  // --- what changed (vs the on-chain originals) ---
+  const changes = detectChanges(orig.forceDeploymentsData, orig.upgradeCutData, hashes);
+  assert(changes.length > 0, "no affected descriptors detected on-chain vs AllContractsHashes.json");
+  console.log(`  detected ${changes.length} changed descriptor(s):`);
+  for (const c of changes) {
+    console.log(`    ${c.contract}: ${c.old.keccak} -> ${c.nw.keccak}`);
+  }
+
+  // --- (1) data differs from on-chain originals ONLY in the changed substrings ---
+  assert(
+    eqHex(expectedPatched(orig.forceDeploymentsData, changes), patch.force_deployments_data),
+    "force_deployments_data is not the on-chain original with only the changed bytecode descriptors substituted"
+  );
+  assert(
+    eqHex(expectedPatched(orig.upgradeCutData, changes), patch.chain_upgrade_diamond_cut),
+    "chain_upgrade_diamond_cut is not the on-chain original with only the changed descriptors substituted"
+  );
+  // The chain-creation diamond cut must be byte-identical to on-chain (untouched).
+  assert(eqHex(abi.encode([DIAMOND_CUT_DATA], [orig.diamondCut]), patch.diamond_cut_data), "diamond_cut_data changed");
+
+  // --- (1b) completeness: every reference in the patched data is a current hash ---
+  for (const k of collectFfdKeccaks(patch.force_deployments_data)) {
+    assert(known.has(k), `force_deployments_data references unknown bytecode hash ${k}`);
+  }
+
+  // --- (2) the ChainTypeManager calls were constructed correctly ---
+  // setChainCreationParams: original params with ONLY forceDeploymentsData swapped.
+  assert(
+    strip0x(patch.set_chain_creation_params_calldata).startsWith(strip0x(selector(SIG_SET_CHAIN_CREATION_PARAMS))),
+    "set_chain_creation_params_calldata has the wrong selector"
+  );
+  const [ccpArg] = abi.decode(
+    [CHAIN_CREATION_PARAMS],
+    "0x" + strip0x(patch.set_chain_creation_params_calldata).slice(8)
+  );
+  assert(
+    ethers.utils.getAddress(ccpArg.genesisUpgrade) === ethers.utils.getAddress(orig.genesisUpgrade),
+    "genesisUpgrade changed"
+  );
+  assert(eqHex(ccpArg.genesisBatchHash, orig.genesisBatchHash), "genesisBatchHash changed");
+  assert(
+    ethers.BigNumber.from(ccpArg.genesisIndexRepeatedStorageChanges).eq(orig.genesisIndexRepeatedStorageChanges),
+    "genesisIndex changed"
+  );
+  assert(eqHex(ccpArg.genesisBatchCommitment, orig.genesisBatchCommitment), "genesisBatchCommitment changed");
+  assert(
+    eqHex(abi.encode([DIAMOND_CUT_DATA], [ccpArg.diamondCut]), patch.diamond_cut_data),
+    "ccp.diamondCut != on-chain diamond cut"
+  );
+  assert(
+    eqHex(ccpArg.forceDeploymentsData, patch.force_deployments_data),
+    "ccp.forceDeploymentsData != patched force deployments"
+  );
+
+  // setUpgradeDiamondCut: the patched cut + the old protocol version.
+  assert(
+    strip0x(patch.set_upgrade_diamond_cut_calldata).startsWith(strip0x(selector(SIG_SET_UPGRADE_DIAMOND_CUT))),
+    "set_upgrade_diamond_cut_calldata has the wrong selector"
+  );
+  const [cutArg, oldVerArg] = abi.decode(
+    [DIAMOND_CUT_DATA, "uint256"],
+    "0x" + strip0x(patch.set_upgrade_diamond_cut_calldata).slice(8)
+  );
+  assert(
+    eqHex(abi.encode([DIAMOND_CUT_DATA], [cutArg]), patch.chain_upgrade_diamond_cut),
+    "setUpgradeDiamondCut cut != patched upgrade cut"
+  );
+  assert(
+    ethers.BigNumber.from(oldVerArg).eq(orig.oldProtocolVersion),
+    "setUpgradeDiamondCut old version != on-chain old protocol version"
+  );
+
+  // governance_calls = abi.encode([setChainCreationParams, setUpgradeDiamondCut]) at the CTM.
+  const [calls] = abi.decode([`${CALL}[]`], patch.governance_calls);
+  assert(calls.length === 2, `expected 2 governance calls, found ${calls.length}`);
+  assert(ethers.utils.getAddress(calls[0].target) === ethers.utils.getAddress(ctm), "call0 target != CTM");
+  assert(ethers.utils.getAddress(calls[1].target) === ethers.utils.getAddress(ctm), "call1 target != CTM");
+  assert(eqHex(calls[0].data, patch.set_chain_creation_params_calldata), "call0 != setChainCreationParams calldata");
+  assert(eqHex(calls[1].data, patch.set_upgrade_diamond_cut_calldata), "call1 != setUpgradeDiamondCut calldata");
+
+  console.log("\nAll checks passed:");
+  console.log("  - chain-creation params / upgrade data differ from the on-chain originals");
+  console.log("    only in the bytecode descriptors that AllContractsHashes.json says changed;");
+  console.log("  - setChainCreationParams + setUpgradeDiamondCut calls are correctly constructed.");
+}
+
+main().catch((e) => {
+  console.error(e.message || e);
+  process.exit(1);
+});
