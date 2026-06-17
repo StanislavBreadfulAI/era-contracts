@@ -1,0 +1,8 @@
+{
+  "l1RpcUrlEnv": "TENDERLY_SEPOLIA",
+  "eraCtm": "0x8b448ac7cd0f18F3d8464E2645575772a26A3b6b",
+  "oldProtocolVersion": 124554051588,
+  "newProtocolVersion": 133143986176,
+  "alreadyUpgradedChains": [6475, 499],
+  "affectedForceDeployContracts": ["L2AssetTracker"]
+}
