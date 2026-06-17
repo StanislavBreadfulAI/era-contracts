@@ -1,21 +1,19 @@
 /**
  * Cross-check for `deploy-scripts/upgrade/v31/PatchTotalSupplyV31UpgradeData.s.sol`.
  *
- * The v31 base-token `totalSupply` fix changes the compiled L2AssetTracker bytecode and,
- * transitively, the bytecode of the L2 genesis/upgrade contracts that embed its hash. Those
- * zk bytecode hashes are baked into the v31 upgrade data the Era ChainTypeManager stores
- * (the upgrade `DiamondCutData` and the `ChainCreationParams`).
+ * Like the Solidity script, this obtains the previous v31 upgrade data **on chain from the Era
+ * ChainTypeManager**: it reads `upgradeCutDataBlock` / `newChainCreationParamsBlock`, fetches the
+ * `NewUpgradeCutData` / `NewChainCreationParams` events, decodes the previous upgrade cut and
+ * chain creation params, and verifies them against the on-chain `upgradeCutHash` / `initialCutHash`.
  *
- * This script independently re-derives the same patch calls the Solidity script produces:
- *   - it reads the *new* bytecode hashes from `AllContractsHashes.json` (the file the repo's
- *     `calculate-hashes` tooling regenerates) instead of from the build artifacts, and
- *   - it reads the same previous-upgrade-data / previous-hashes / config fixtures.
- *
- * It then byte-replaces every stale 32-byte hash, rebuilds the patch calls, and prints the
- * keccak of `abi.encode(Call[])`. `run-and-crosscheck.sh` asserts this equals the Solidity
- * script's output, proving the two implementations agree.
+ * It then re-derives the patch calls exactly like the Solidity script, except the *new* bytecode
+ * hashes are read from `AllContractsHashes.json` (the repo's hash tooling output) rather than from
+ * the build artifacts. Finally it asserts `keccak256(abi.encode(Call[]))` equals the Solidity
+ * script's output — proving the two implementations agree (and, because they source the new hashes
+ * differently, that AllContractsHashes.json is consistent with the artifacts).
  *
  * Usage: ts-node scripts/patch-total-supply-crosscheck.ts
+ * Requires the RPC env var named in config.json (e.g. TENDERLY_SEPOLIA) to be set.
  */
 import { ethers } from "ethers";
 import * as fs from "fs";
@@ -25,28 +23,8 @@ const L1_ROOT = path.resolve(__dirname, "..");
 const PATCH_DIR = path.join(L1_ROOT, "deploy-scripts/upgrade/v31/patch-total-supply");
 const ALL_CONTRACTS_HASHES = path.resolve(L1_ROOT, "..", "AllContractsHashes.json");
 
-// Must match `CANDIDATE_CONTRACTS` in PatchTotalSupplyV31UpgradeData.s.sol.
-const CANDIDATE_CONTRACTS = [
-  "L2AssetTracker",
-  "L2GenesisUpgrade",
-  "L2GenesisForceDeploymentsHelper",
-  "L2ComplexUpgrader",
-  "L2V30TestnetSystemProxiesUpgrade",
-  "L2Bridgehub",
-  "L2AssetRouter",
-  "L2NativeTokenVault",
-  "L2MessageRoot",
-  "L2ChainAssetHandler",
-  "UpgradeableBeaconDeployer",
-  "BaseTokenHolder",
-  "InteropCenter",
-  "InteropHandler",
-  "BeaconProxy",
-];
-
 const abi = ethers.utils.defaultAbiCoder;
 
-// Struct + function fragments mirroring IChainTypeManager / Diamond.
 const DIAMOND_CUT_TYPE =
   "tuple(tuple(address facet, uint8 action, bool isFreezable, bytes4[] selectors)[] facetCuts, address initAddress, bytes initCalldata)";
 const CHAIN_CREATION_PARAMS_TYPE =
@@ -55,34 +33,53 @@ const CHAIN_CREATION_PARAMS_TYPE =
   " diamondCut, bytes forceDeploymentsData)";
 const CALL_ARRAY_TYPE = "tuple(address target, uint256 value, bytes data)[]";
 
+// FixedForceDeploymentsData (only the layout matters for decoding the embedded hashes).
+const FFD_TYPE =
+  "tuple(uint256 l1ChainId, uint256 gatewayChainId, uint256 eraChainId, address l1AssetRouter, bytes32 l2TokenProxyBytecodeHash, address aliasedL1Governance, uint256 maxNumberOfZKChains, bytes bridgehubBytecodeInfo, bytes l2AssetRouterBytecodeInfo, bytes l2NtvBytecodeInfo, bytes messageRootBytecodeInfo, bytes chainAssetHandlerBytecodeInfo, bytes interopCenterBytecodeInfo, bytes interopHandlerBytecodeInfo, bytes assetTrackerBytecodeInfo, bytes beaconDeployerInfo, bytes baseTokenHolderBytecodeInfo, address l2SharedBridgeLegacyImpl, address l2BridgedStandardERC20Impl, address aliasedChainRegistrationSender, address dangerousTestOnlyForcedBeacon, bytes32 zkTokenAssetId)";
+
+const NEW_CHAIN_CREATION_PARAMS_EVENT =
+  "event NewChainCreationParams(address genesisUpgrade, bytes32 genesisBatchHash, uint64 genesisIndexRepeatedStorageChanges, bytes32 genesisBatchCommitment, " +
+  DIAMOND_CUT_TYPE +
+  " newInitialCut, bytes32 newInitialCutHash, bytes forceDeploymentsData, bytes32 forceDeploymentHash)";
+
+const eventsIface = new ethers.utils.Interface([
+  "event NewUpgradeCutData(uint256 indexed protocolVersion, " + DIAMOND_CUT_TYPE + " diamondCutData)",
+  NEW_CHAIN_CREATION_PARAMS_EVENT,
+]);
+const NEW_UPGRADE_CUT_DATA_TOPIC = eventsIface.getEventTopic("NewUpgradeCutData");
+const NEW_CHAIN_CREATION_PARAMS_TOPIC = eventsIface.getEventTopic("NewChainCreationParams");
+
 const ctmIface = new ethers.utils.Interface([
-  `function setNewVersionUpgrade(${DIAMOND_CUT_TYPE} _cutData, uint256 _oldProtocolVersion, uint256 _oldProtocolVersionDeadline, uint256 _newProtocolVersion, address _verifier)`,
   `function setChainCreationParams(${CHAIN_CREATION_PARAMS_TYPE} _chainCreationParams)`,
   `function setUpgradeDiamondCut(${DIAMOND_CUT_TYPE} _cutData, uint256 _oldProtocolVersion)`,
   `function executeUpgrade(uint256 _chainId, ${DIAMOND_CUT_TYPE} _diamondCut)`,
+  "function initialCutHash() view returns (bytes32)",
+  "function upgradeCutHash(uint256) view returns (bytes32)",
+  "function upgradeCutDataBlock(uint256) view returns (uint256)",
+  "function newChainCreationParamsBlock(uint256) view returns (uint256)",
 ]);
 
-const SELECTORS = {
-  setNewVersionUpgrade: ctmIface.getSighash("setNewVersionUpgrade"),
-  setChainCreationParams: ctmIface.getSighash("setChainCreationParams"),
+// FixedForceDeploymentsData field that holds each force-deploy contract's bytecode hash.
+const FFD_FIELD: Record<string, string> = {
+  L2AssetTracker: "assetTrackerBytecodeInfo",
+  L2Bridgehub: "bridgehubBytecodeInfo",
+  L2AssetRouter: "l2AssetRouterBytecodeInfo",
+  L2NativeTokenVault: "l2NtvBytecodeInfo",
+  L2MessageRoot: "messageRootBytecodeInfo",
+  L2ChainAssetHandler: "chainAssetHandlerBytecodeInfo",
+  InteropCenter: "interopCenterBytecodeInfo",
+  InteropHandler: "interopHandlerBytecodeInfo",
+  UpgradeableBeaconDeployer: "beaconDeployerInfo",
+  BaseTokenHolder: "baseTokenHolderBytecodeInfo",
 };
 
-interface Call {
-  target: string;
-  value: ethers.BigNumber;
-  data: string;
-}
-
 interface PatchConfig {
+  l1RpcUrlEnv: string;
   eraCtm: string;
   oldProtocolVersion: ethers.BigNumber;
-  oldProtocolVersionDeadline: ethers.BigNumber;
   newProtocolVersion: ethers.BigNumber;
-  verifier: string;
-  genesisUpgrade: string;
-  l1ChainId: ethers.BigNumber;
-  eraChainId: ethers.BigNumber;
   alreadyUpgradedChains: ethers.BigNumber[];
+  affectedForceDeployContracts: string[];
 }
 
 interface Replacement {
@@ -95,40 +92,28 @@ function readJson(p: string): any {
   return JSON.parse(fs.readFileSync(p, "utf8"));
 }
 
-function loadNewHashes(): Record<string, string> {
+function loadConfig(): PatchConfig {
+  const c = readJson(path.join(PATCH_DIR, "config.json"));
+  return {
+    l1RpcUrlEnv: c.l1RpcUrlEnv,
+    eraCtm: c.eraCtm,
+    oldProtocolVersion: ethers.BigNumber.from(c.oldProtocolVersion),
+    newProtocolVersion: ethers.BigNumber.from(c.newProtocolVersion),
+    alreadyUpgradedChains: (c.alreadyUpgradedChains as Array<string | number>).map((x) => ethers.BigNumber.from(x)),
+    affectedForceDeployContracts: c.affectedForceDeployContracts,
+  };
+}
+
+function newHashFromAllContractsHashes(contractName: string): string {
   const all: { contractName: string; zkBytecodeHash: string | null }[] = readJson(ALL_CONTRACTS_HASHES);
-  const byName = new Map(all.map((c) => [c.contractName, c.zkBytecodeHash]));
-  const res: Record<string, string> = {};
-  for (const name of CANDIDATE_CONTRACTS) {
-    const key = `l1-contracts/${name}`;
-    const h = byName.get(key);
-    if (!h) {
-      throw new Error(`AllContractsHashes.json missing zkBytecodeHash for ${key}`);
-    }
-    res[name] = h.toLowerCase();
+  const entry = all.find((c) => c.contractName === `l1-contracts/${contractName}`);
+  if (!entry || !entry.zkBytecodeHash) {
+    throw new Error(`AllContractsHashes.json missing zkBytecodeHash for l1-contracts/${contractName}`);
   }
-  return res;
+  return entry.zkBytecodeHash.toLowerCase();
 }
 
-function computeReplacements(): Replacement[] {
-  const prev: Record<string, string> = readJson(path.join(PATCH_DIR, "previous-bytecode-hashes.json"));
-  const next = loadNewHashes();
-  const out: Replacement[] = [];
-  for (const name of CANDIDATE_CONTRACTS) {
-    const oldHash = prev[name].toLowerCase();
-    const newHash = next[name];
-    if (oldHash !== newHash) {
-      out.push({ contractName: name, oldHash, newHash });
-    }
-  }
-  return out;
-}
-
-/**
- * Replaces every byte-aligned occurrence of each 32-byte oldHash with newHash.
- * Operates on the raw byte array (exactly like the Solidity `_replaceWord` byte scan) so the
- * two implementations cannot diverge on alignment.
- */
+/** Byte-aligned find-and-replace of each 32-byte oldHash with newHash (mirrors Solidity _replaceWord). */
 function replaceAll(dataHex: string, replacements: Replacement[]): string {
   const data = Array.from(ethers.utils.arrayify(dataHex));
   for (const r of replacements) {
@@ -143,97 +128,120 @@ function replaceAll(dataHex: string, replacements: Replacement[]): string {
         }
       }
       if (matchHere) {
-        for (let j = 0; j < 32; j++) {
-          data[i + j] = newWord[j];
-        }
+        for (let j = 0; j < 32; j++) data[i + j] = newWord[j];
       }
     }
   }
   return ethers.utils.hexlify(Uint8Array.from(data));
 }
 
-function loadConfig(): PatchConfig {
-  const c = readJson(path.join(PATCH_DIR, "config.json"));
-  return {
-    eraCtm: c.eraCtm,
-    oldProtocolVersion: ethers.BigNumber.from(c.oldProtocolVersion),
-    oldProtocolVersionDeadline: ethers.BigNumber.from(c.oldProtocolVersionDeadline),
-    newProtocolVersion: ethers.BigNumber.from(c.newProtocolVersion),
-    verifier: c.verifier,
-    genesisUpgrade: c.genesisUpgrade,
-    l1ChainId: ethers.BigNumber.from(c.l1ChainId),
-    eraChainId: ethers.BigNumber.from(c.eraChainId),
-    alreadyUpgradedChains: (c.alreadyUpgradedChains as Array<string | number>).map((x) => ethers.BigNumber.from(x)),
-  };
+async function getSingleLog(
+  provider: ethers.providers.Provider,
+  address: string,
+  topics: (string | null)[],
+  block: number
+): Promise<ethers.providers.Log> {
+  const logs = await provider.getLogs({ address, topics, fromBlock: block, toBlock: block });
+  if (logs.length !== 1) {
+    throw new Error(`expected exactly one log, got ${logs.length}`);
+  }
+  return logs[0];
 }
 
-function loadPreviousCalls(): Call[] {
-  const raw = readJson(path.join(PATCH_DIR, "previous-upgrade-data.json")).calls as string;
-  const [decoded] = abi.decode([CALL_ARRAY_TYPE], raw);
-  return decoded.map((c: any) => ({ target: c.target, value: c.value, data: c.data }));
-}
-
-function main() {
+async function main() {
   const cfg = loadConfig();
-  const previousCalls = loadPreviousCalls();
-  const replacements = computeReplacements();
+  const rpcUrl = process.env[cfg.l1RpcUrlEnv];
+  if (!rpcUrl) {
+    throw new Error(`RPC env var ${cfg.l1RpcUrlEnv} is not set`);
+  }
+  const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  const ctm = new ethers.Contract(cfg.eraCtm, ctmIface, provider);
 
-  console.log(`Bytecode-hash replacements: ${replacements.length}`);
-  for (const r of replacements) {
-    console.log(`  ${r.contractName}\n    ${r.oldHash}\n    ${r.newHash}`);
+  // --- obtain the previous upgrade data on chain ---
+  const cutBlock = (await ctm.upgradeCutDataBlock(cfg.oldProtocolVersion)).toNumber();
+  const ccpBlock = (await ctm.newChainCreationParamsBlock(cfg.newProtocolVersion)).toNumber();
+  if (cutBlock === 0 || ccpBlock === 0) {
+    throw new Error("CTM has no recorded upgrade cut / chain creation params blocks for these versions");
   }
 
-  // Locate and patch the Era-CTM calls.
-  let patchedCut: any = undefined;
-  let patchedChainCreationData: string | undefined = undefined;
-
-  for (const call of previousCalls) {
-    if (call.target.toLowerCase() !== cfg.eraCtm.toLowerCase()) {
-      continue;
-    }
-    const selector = call.data.slice(0, 10);
-    const patchedData = replaceAll(call.data, replacements);
-
-    if (selector === SELECTORS.setNewVersionUpgrade) {
-      // cut is the first (dynamic) parameter; decoding it alone mirrors the Solidity helper.
-      const args = "0x" + patchedData.slice(10);
-      [patchedCut] = abi.decode([DIAMOND_CUT_TYPE], args);
-    } else if (selector === SELECTORS.setChainCreationParams) {
-      patchedChainCreationData = patchedData.startsWith("0x") ? patchedData : "0x" + patchedData;
-    }
-  }
-
-  if (patchedCut === undefined) {
-    throw new Error("no setNewVersionUpgrade call in previous data");
-  }
-  if (patchedChainCreationData === undefined) {
-    throw new Error("no setChainCreationParams call in previous data");
-  }
-
-  const calls: Call[] = [];
-  // 1. Overwrite the stored v31 upgrade cut.
-  calls.push({
-    target: cfg.eraCtm,
-    value: ethers.constants.Zero,
-    data: ctmIface.encodeFunctionData("setUpgradeDiamondCut", [patchedCut, cfg.oldProtocolVersion]),
-  });
-  // 2. Update chain creation params (raw patched calldata).
-  calls.push({ target: cfg.eraCtm, value: ethers.constants.Zero, data: patchedChainCreationData });
-  // 3. Re-run the upgrade on already-upgraded chains.
-  for (const chainId of cfg.alreadyUpgradedChains) {
-    calls.push({
-      target: cfg.eraCtm,
-      value: ethers.constants.Zero,
-      data: ctmIface.encodeFunctionData("executeUpgrade", [chainId, patchedCut]),
-    });
-  }
-
-  const encoded = abi.encode(
-    [CALL_ARRAY_TYPE],
-    [calls.map((c) => [c.target, c.value, c.data])]
+  const cutLog = await getSingleLog(
+    provider,
+    cfg.eraCtm,
+    [NEW_UPGRADE_CUT_DATA_TOPIC, ethers.utils.hexZeroPad(cfg.oldProtocolVersion.toHexString(), 32)],
+    cutBlock
   );
-  const keccak = ethers.utils.keccak256(encoded);
+  const cutEncoded = cutLog.data; // abi.encode(DiamondCutData)
 
+  const ccpLog = await getSingleLog(provider, cfg.eraCtm, [NEW_CHAIN_CREATION_PARAMS_TOPIC], ccpBlock);
+  const ccpEvent = eventsIface.decodeEventLog("NewChainCreationParams", ccpLog.data, ccpLog.topics);
+  const chainCreationParams = [
+    ccpEvent.genesisUpgrade,
+    ccpEvent.genesisBatchHash,
+    ccpEvent.genesisIndexRepeatedStorageChanges,
+    ccpEvent.genesisBatchCommitment,
+    ccpEvent.newInitialCut,
+    ccpEvent.forceDeploymentsData,
+  ];
+  const ccpEncoded = abi.encode([CHAIN_CREATION_PARAMS_TYPE], [chainCreationParams]);
+
+  // --- verify against the on-chain hashes ---
+  const onChainCutHash = (await ctm.upgradeCutHash(cfg.oldProtocolVersion)).toLowerCase();
+  if (ethers.utils.keccak256(cutEncoded).toLowerCase() !== onChainCutHash) {
+    throw new Error("decoded upgrade cut does not match on-chain upgradeCutHash");
+  }
+  const onChainInitialCutHash = (await ctm.initialCutHash()).toLowerCase();
+  if (ethers.utils.keccak256(abi.encode([DIAMOND_CUT_TYPE], [ccpEvent.newInitialCut])).toLowerCase() !== onChainInitialCutHash) {
+    throw new Error("decoded initial cut does not match on-chain initialCutHash");
+  }
+
+  // --- compute replacements (old from chain, new from AllContractsHashes.json) ---
+  const [ffd] = abi.decode([FFD_TYPE], ccpEvent.forceDeploymentsData);
+  const replacements: Replacement[] = [];
+  for (const name of cfg.affectedForceDeployContracts) {
+    let oldHash: string;
+    if (name === "BeaconProxy") {
+      oldHash = ffd.l2TokenProxyBytecodeHash.toLowerCase();
+    } else {
+      const field = FFD_FIELD[name];
+      if (!field) throw new Error(`unknown force-deploy contract: ${name}`);
+      oldHash = abi.decode(["bytes32"], (ffd as any)[field])[0].toLowerCase();
+    }
+    const newHash = newHashFromAllContractsHashes(name);
+    if (oldHash !== newHash) {
+      replacements.push({ contractName: name, oldHash, newHash });
+    }
+  }
+
+  console.log(`Loaded previous v31 upgrade data from CTM: ${cfg.eraCtm}`);
+  console.log(`  upgrade cut block: ${cutBlock}, chain creation params block: ${ccpBlock}`);
+  console.log(`Bytecode-hash replacements: ${replacements.length}`);
+  for (const r of replacements) console.log(`  ${r.contractName}\n    ${r.oldHash}\n    ${r.newHash}`);
+
+  // --- patch and rebuild the calls ---
+  const [patchedCut] = abi.decode([DIAMOND_CUT_TYPE], replaceAll(cutEncoded, replacements));
+  const [patchedParams] = abi.decode([CHAIN_CREATION_PARAMS_TYPE], replaceAll(ccpEncoded, replacements));
+
+  const calls: Array<[string, ethers.BigNumber, string]> = [];
+  calls.push([
+    cfg.eraCtm,
+    ethers.constants.Zero,
+    ctmIface.encodeFunctionData("setUpgradeDiamondCut", [patchedCut, cfg.oldProtocolVersion]),
+  ]);
+  calls.push([
+    cfg.eraCtm,
+    ethers.constants.Zero,
+    ctmIface.encodeFunctionData("setChainCreationParams", [patchedParams]),
+  ]);
+  for (const chainId of cfg.alreadyUpgradedChains) {
+    calls.push([
+      cfg.eraCtm,
+      ethers.constants.Zero,
+      ctmIface.encodeFunctionData("executeUpgrade", [chainId, patchedCut]),
+    ]);
+  }
+
+  const encoded = abi.encode([CALL_ARRAY_TYPE], [calls]);
+  const keccak = ethers.utils.keccak256(encoded);
   console.log(`Patched call count: ${calls.length}`);
   console.log(`Patched calls keccak: ${keccak}`);
 
@@ -241,19 +249,13 @@ function main() {
   fs.writeFileSync(outPath, JSON.stringify({ encodedCalls: encoded, callsKeccak: keccak }, null, 2) + "\n");
   console.log(`Wrote ${outPath}`);
 
-  // If the Solidity output is present, cross-check it.
   const solPath = path.join(PATCH_DIR, "patched-calls.sol.json");
   if (fs.existsSync(solPath)) {
     const sol = readJson(solPath);
-    const solKeccak = (sol.callsKeccak as string).toLowerCase();
-    if (solKeccak !== keccak.toLowerCase()) {
+    if ((sol.callsKeccak as string).toLowerCase() !== keccak.toLowerCase()) {
       console.error("MISMATCH: TS and Solidity patched calls differ");
-      console.error(`  sol keccak: ${solKeccak}`);
+      console.error(`  sol keccak: ${(sol.callsKeccak as string).toLowerCase()}`);
       console.error(`  ts  keccak: ${keccak.toLowerCase()}`);
-      if (sol.encodedCalls) {
-        console.error(`  sol encoded: ${(sol.encodedCalls as string).toLowerCase()}`);
-        console.error(`  ts  encoded: ${encoded.toLowerCase()}`);
-      }
       process.exit(1);
     }
     console.log("CROSS-CHECK OK: TS keccak(abi.encode(Call[])) is identical to the Solidity script output.");
@@ -262,4 +264,7 @@ function main() {
   }
 }
 
-main();
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
