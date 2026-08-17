@@ -18,6 +18,8 @@ fs_permissions = [
 ]
 cache_path = 'cache-forge'
 test = 'test/foundry'
+optimizer = true
+optimizer_runs = 200
 solc_version = "0.8.28"
 evm_version = "cancun"
 ignored_error_codes = [

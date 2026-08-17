@@ -4,6 +4,8 @@ out = "out"
 libs = ["lib"]
 cache_path = "cache-forge"
 evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
 solc_version = "0.8.28"
 remappings = [
     "@openzeppelin/contracts-v4/=lib/openzeppelin-contracts-v4/contracts/",
@@ -11,6 +13,12 @@ remappings = [
 ]
 
 [profile.default.zksync]
-zksolc = "1.5.17"
+# NOTE: the "-1.5.17" suffix is not a real pre-release. foundry-zksync resolves stable
+# versions from the retired matter-labs/zksolc-bin mirror (last release v1.5.15) and only
+# uses the canonical era-compiler-solidity releases for pre-release versions, so the
+# suffix is what routes the download to the tag that actually carries 1.5.17. It does not
+# affect the produced bytecode. Drop it once foundry-zksync resolves stable versions from
+# era-compiler-solidity too.
+zksolc = "1.5.17-1.5.17"
 enable_eravm_extensions = true
 suppressed_errors = ["sendtransfer"]

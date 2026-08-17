@@ -22,18 +22,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
  && rm -rf /var/lib/apt/lists/*
 
 # Foundry ZKSync (pinned)
-RUN curl -LO https://github.com/matter-labs/foundry-zksync/releases/download/nightly-ae913af65381734ad46c044a9495b67310bc77c4/foundry_nightly_linux_amd64.tar.gz \
- && tar zxf foundry_nightly_linux_amd64.tar.gz -C /usr/local/bin/ \
+RUN curl -LO https://github.com/matter-labs/foundry-zksync/releases/download/foundry-zksync-v0.1.10/foundry_zksync_v0.1.10_linux_amd64.tar.gz \
+ && tar zxf foundry_zksync_v0.1.10_linux_amd64.tar.gz -C /usr/local/bin/ \
  && chmod +x /usr/local/bin/forge /usr/local/bin/cast \
- && rm foundry_nightly_linux_amd64.tar.gz
+ && rm foundry_zksync_v0.1.10_linux_amd64.tar.gz
 
 # Copy sources
 WORKDIR /contracts
 COPY . /contracts
 RUN yarn install --frozen-lockfile
-
-# zksolc versions pinned by the foundry.toml files (see the script for why)
-RUN ./scripts/install-zksolc.sh
 
 # Clean
 RUN forge clean --root da-contracts
