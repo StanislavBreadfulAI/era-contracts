@@ -154,7 +154,10 @@ The bundle hash commits to `interopBundleSalt = keccak256(abi.encodePacked(msg.s
 
 (Historical note: the salt used to be derived from a per-sender nonce; the deprecated `__DEPRECATED_interopBundleNonce` mapping slot is retained only to preserve the storage layout.)
 
-On the destination, replay of a bundle is prevented by the `bundleStatus` state machine: execution/unbundling flips the status before any external call (CEI), so a bundle can be fully executed or unbundled only once.
+On the destination, replay is prevented by the bundle/call status machines. Full execution marks the
+bundle and every call before external interaction and cannot be repeated. Unbundling may be invoked
+more than once, but each call can transition out of `Unprocessed` only once; an `Executed` call can
+never be cancelled or executed again.
 
 ## Bundle-hash preview
 
