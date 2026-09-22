@@ -1,40 +1,45 @@
-# Forms of finality
+# Forms of interop finality
 
-Interop requires the importing of a [MessageRoot](./message_root.md) from some other chain. The MessageRoot commits to the interop tx. This can be done in different ways, depending on the security trust between the chains.
+The current contracts use two proof forms. The destination determines the proof from the route; users
+do not select a finality mode with an SDK flag.
 
-![MessageRoot](../img/message_root.png)
+## Atomic IMT finality for L2 -> L2
 
-1. Proof based interop
-2. Commit based interop
-3. Pre-commit based interop. 
+Every L2 -> L2 bundle is a leg of an atomic flow. The source `InteropCenter` sends the bundle hash to
+`AtomicFlowManager`, which inserts a flow-bound commit value into that chain's indexed interop
+commitment tree. At batch boundaries the chain batch root commits to the tree root. Settlement then
+incorporates the chain batch root into `MessageRoot`, and other L2s import the aggregate root.
 
-Note, that currently, we're only working with proof based interop in production. Though, commit and pre-commit based interop might also be implemented in the future releases.
+`L2InteropHandler.executeAtomicBundle` or `verifyAtomicBundle` receives one inclusion proof per flow
+leg. `AtomicFlowManager.requireFlowFinalized` authenticates each source-chain tree root against an
+imported interop root and checks that every leg was committed no later than the flow deadline. See
+{protocol-docs/atomicity/proofs.md} for the proof format and its soundness argument.
 
-## Proof based interop
+This is commit-based finality in the sense that it proves commitment-tree membership. It is not the
+older public-bundle design in which an L2 -> L1 message was proven separately for each L2 -> L2 call.
 
-The batch where the interop tx is emitted is [sealed](../../blocks_batches.md#L1-batches) and committed to the chain's settlement layer (Gateway or L1, for now only those are whitelisted as SLs). Proof is posted on the SL, and the batch is fully finalized and cannot be reverted. When this happens the SL's `MessageRoot` is updated. The receiving chain imports this `MessageRoot`. When the receiving chain settles using the [Executor facet](https://github.com/matter-labs/era-contracts/blob/fcdf5d487f856d1e23c854c6d3421dccf50d2c95/l1-contracts/contracts/state-transition/chain-deps/facets/Executor.sol#L553-L554), its imported `MessageRoot` is checked against the MessageRoot.sol contract.
+## Message-inclusion finality for L2 -> L1
 
-This solution is the most trustless, but it is the slowest, since proofs have to be generated. To use this kind of interop, we specify the `proof_based_gw` interop mode when interacting with the SDK: this will serve a Merkle proof of inclusion of the log of interest inside Gateway's `MessageRoot`.
+An L2 -> L1 bundle is a withdrawal: one indirect, zero-value call produced by the L2 asset router and
+targeting the canonical L1 asset router. `InteropCenter` prefixes the ABI-encoded bundle with
+`BUNDLE_IDENTIFIER` and publishes it through the L2-to-L1 messenger.
 
-## Commit/Batch based interop
+`L1InteropHandler.executeBundle` or `verifyBundle` receives a `MessageInclusionProof`. The handler
+reconstructs the prefixed message, requires the canonical L2 `InteropCenter` as its sender, and proves
+inclusion through the L1 `MessageRoot`. The L1 handler additionally pins the execution target to the
+canonical L1 asset router and rejects non-zero call value.
 
-The batch has to be sealed and committed to the SL. We do not wait for the `MessageRoot` to be updated. We get the `ChainBatchRoot` of the source chain from the DiamondProxy of the chain itself. When the receiving chain commits the batch, the imported `ChainBatchRoot` is stored as a dependency. When the batch is executed, it is checked that all the dependencies have been executed.
+## Imported-root safety
 
-This is faster than proof based interop, but not as fast as pre-commit based interop. It is also the middle ground in security.
+An imported dependency is a `(chainId, blockOrBatchNumber, root, timestamp)` tuple. The bootloader is
+the only writer to `L2InteropRootStorage`; zero roots, zero timestamps, duplicate keys, and malformed
+`sides` are rejected. When the importing chain's batch executes, `ExecutorFacet` checks each imported
+tuple against `MessageRoot.historicalRoot` on the settlement layer. Protocols such as atomic timeout
+may therefore rely on both the root and its timestamp.
 
-## Pre-commit/parallel building interop
+## Unsupported historical modes
 
-Batches are not sealed, but built in parallel. `L2ToL1LogsRoot` is updated mid batch after each block. The receiving chain can read the current `L2ToL1LogsRoot` from the `L1Messenger` contract of the source chain. This can be two way, i.e. both chains can read from each other. It can happen multiple times inside a batch as well. If multiple roots were imported from the same batch, when settling they are aggregated and only the last node is sent. When settling, the imported `L2ToL1LogsRoot` might not be the final one that is settled by the source chain. An additional merkle proof will have to complete the root. This final root can be checked against the pending root of the other chain. If the roots match, then the batches of the chains have to be executed in parallel.
-
-- Note: this solution can also be used for Shared Sequencing.
-- Note: the L2ToL1 messages are aggregated in a Dynamic Incramental Merkle tree, see [here](https://github.com/matter-labs/era-contracts/blob/fcdf5d487f856d1e23c854c6d3421dccf50d2c95/l1-contracts/contracts/common/libraries/DynamicIncrementalMerkle.sol). 
-
-This solution is the fastest. 
-
-# Security considerations for Precommit based interop
-
-When doing interop between chains, the receiving chain needs to ensure that it can safely receive interop txs. For this it needs two things, it needs to know that the execution of the block is correct, and that the block will be finalized. 
-
-To make sure that the block was executed correctly, the chains can run ENs for each other. In the future, this might be replaced with TEEs. 
-
-To make sure that the blocks are finalized, there will be an onchain way to commit to the execution of the blocks. If the block is not executed in a timely fashion, an emergency mode will be activated, during which anybody can execute batches corresponding to the corresponding blocks. 
+The ported `zksync-era` documentation also described trigger-based automatic execution,
+AliasedAccounts, public non-atomic L2 -> L2 messages, and pre-commit/parallel-building finality. Those
+are not supported by this release. `InteropRoot.sides` retains a forward-compatible array encoding,
+but current proof- and commit-based imports require exactly one element: the root.

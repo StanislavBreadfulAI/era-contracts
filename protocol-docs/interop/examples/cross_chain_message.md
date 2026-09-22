@@ -1,44 +1,37 @@
-# Interop Message Simple Use Case
+# Cross-chain message
 
-For this example, imagine you want to allow users to signup on multiple chains - but you want to coordinate when the signup starts.
+Suppose a controller on chain A must open registration in a recipient contract on chain B. The
+controller sends one direct ERC-7786 message whose payload encodes the recipient's `openRegistration`
+call.
 
-With the help of interop, you only have to open the signup once, on one chain, no need to do that as many times as there are chains you want to open the signup on!
+## Source-chain preparation
 
-An example of this being done:
+1. Encode the recipient as an ERC-7930 EVM address containing chain B's chain ID and recipient address.
+2. Choose an unused `interopBundleSalt` for the controller.
+3. Call `previewMessageHash` through `eth_call` with the recipient, payload, and all non-atomic
+   attributes. The quoter always reverts with `InteropPreviewHash(bundleHash)`; decode that revert.
+4. Build an `AtomicFlowPreimage` containing the previewed hash and chain A as its source. For a one-leg
+   flow, the strictly ascending bundle-hash requirement is trivially satisfied. Choose a deadline in
+   the L1 settlement-layer timestamp domain.
+5. Call `sendMessage` with the same recipient, payload, and salt plus the `atomicBundle` attribute.
+   The attribute contains the preimage and `lowNullifierIndex`. Any change that affects bundle
+   construction changes the hash and makes the
+   manager reject the send, rolling back the whole transaction.
 
-```solidity
-// Contract deployed on chain A.
-contract SignupManager {
-  public bytes32 sigup_open_msg_hash;
-  function signup_open() onlyOwner {
-    // We are open for business
-    signup_open_msg_hash = L1Messenger(L2_TO_L1_MESSENGER_SYSTEM_CONTRACT_ADDR).sendToL1("We are open");
-  }
-}
+`sendMessage` wraps the call in an `InteropBundle`, emits one ERC-7786 `MessageSent` and one
+`InteropBundleSent`, and commits the leg through `AtomicFlowManager`. It does not create a trigger or
+schedule destination execution.
 
-// Contract deployed on all other chains.
-contract SignupContract {
-  public bool signupIsOpen;
-  // Anyone can call it.
-  function openSignup(uint256 _chainId, uint256 _batchNumber, uint256 _index, L2Message calldata _message, bytes32[] calldata _proof) {
-    IZKChain(zkChain).proveL2MessageInclusionShared(_chainId, _batchNumber, _index, _message, proof);
-    require(_chainId_ == CHAIN_A_ID);
-    require(_message.sender == SIGNUP_MANAGER_ON_CHAIN_A);
-    require(_message.data == "We are open");
-    signupIsOpen = true;
-  }
+## Destination execution
 
-  function signup() {
-     require(signupIsOpen);
-     signedUpUser[msg.sender] = true;
-  }
-}
-```
+After chain A's commitment-tree root settles and is imported, a relayer calls
+`L2InteropHandler.executeAtomicBundle(bundle, finalityProof)` on chain B. The finality proof shows that
+every leg in the flow committed before the deadline. The handler then calls
+`recipient.receiveMessage(receiveId, sender, payload)` and requires the ERC-7786 selector in return.
 
-In the example above, the `signupManager` on chain `A` calls the `signup_open` method. After that, any user on other
-chains can retrieve the `signup_open_msg_hash`, obtain the necessary proof from the Gateway (or another source), and
-call the `openSignup` function on any destination chain. 
+The recipient should authenticate the `sender` interoperable address and reject duplicate
+application-level actions if its own semantics require that. Protocol replay protection prevents the
+same bundle call from executing twice, but it does not define the recipient's business rules.
 
-More details on the overall process can be read [here](../interop_messages.md).
-
-You can also see another example in [Advanced guides](../../../../guides/advanced/19_interop_basics.md).
+If `executionAddress` is empty, anyone may submit the proof. Setting it restricts who can drive the
+bundle; it does not change the authenticated cross-chain sender delivered to the recipient.

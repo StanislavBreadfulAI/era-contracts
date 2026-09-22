@@ -1,91 +1,32 @@
-## Simple Example
+# Atomic multi-leg flow
 
-Imagine you have contracts on chains B, C, and D, and you’d like them to send "reports" to the Headquarters (HQ)
-contract on chain A every time a customer makes a purchase.
+Consider an exchange where one participant transfers an asset from chain A to chain B while another
+transfers a different asset from chain C to chain A. Each source creates its own bundle, but every
+bundle belongs to one `AtomicFlowPreimage`:
 
-```solidity
-// Deployed on chains B, C, D.
-contract Shop {
- /// Called by the customers when they buy something.
- function buy(uint256 itemPrice) {
-   // handle payment etc.
-   ...
-   // report to HQ
-   InteropCenter(INTEROP_ADDRESS).sendCall(
-    324,       // chain id of chain A,
-    0xc425..,  // HQ contract on chain A,
-    createCalldata("reportSales(uint256)", itemPrice), // calldata
-    0,         // no value
-  );
- }
-}
+- `legBundleHashes` contains all previewed bundle hashes in strictly ascending order;
+- `legSourceChainIds` contains the corresponding source chain for each hash;
+- `deadline` is the latest L1 settlement timestamp at which every commitment may enter its source
+  chain's settled tree;
+- `settlementLayerChainId` is the L1 chain ID in this release.
 
-// Deployed on chain A
-contract HQ {
-  // List of shops
-  mapping (address => bool) shops;
-  mapping (address => uint256) sales;
-  function addShop(address addressOnChain, uint256 chainId) onlyOwner {
-    // Adding aliased accounts.
-   shops[address(keccak(addressOnChain || chainId))] = true;
-  }
+Each participant obtains its bundle hash from `previewBundleHash`, computes the same preimage and
+`flowId`, obtains the insertion's `lowNullifierIndex`, and sends its real bundle with the
+`atomicBundle` attribute. `AtomicFlowManager.append` checks that the sent bundle hash is one of the
+declared legs, that its declared source is the current chain, that every source chain is registered,
+and that the deadline has not already passed.
 
-  function reportSales(uint256 itemPrice) {
-    // only allow calls from our shops (their aliased accounts).
-   require(shops[msg.sender]);
-   sales[msg.sender] += itemPrice;
-  }
-}
-```
+No destination can execute after only a subset of legs commits. Each
+`executeAtomicBundle(bundle, finalityProof)` proves inclusion for every declared leg and authenticates
+the corresponding commitment-tree roots through the imported interop root. Once that proof succeeds,
+destinations may be driven independently.
 
-### Cross Chain Swap Example
+If any leg is absent after the deadline, an absence proof for that one leg authorizes recovery for all
+committed legs of the flow on each source chain. Finality and timeout proofs are mutually exclusive,
+so the same flow cannot become executable and refundable.
 
-Imagine you want to perform a swap on chain B, exchanging USDC for PEPE, but all your assets are currently on chain A.
-
-This process would typically involve four steps:
-
-1. Transfer USDC from chain A to chain B.
-2. Set allowance for the swap.
-3. Execute the swap.
-4. Transfer PEPE back to chain A.
-
-Each of these steps is a separate "call," but you need them to execute in exactly this order and, ideally, atomically.
-If the swap fails, you wouldn’t want the allowance to remain set on the destination chain.
-
-Below is an example of how this process could look (note that the code is pseudocode; we’ll explain the helper methods
-required to make it work in a later section).
-
-```solidity
-bundleId = InteropCenter(INTEROP_CENTER).startBundle(chainD);
-// This will 'burn' the 1k USDC, create the special interopCall
-// when this call is executed on chainD, it will mint 1k USDC there.
-// BUT - this interopCall is tied to this bundle id.
-USDCBridge.transferWithBundle(
-  bundleId,
-  chainD,
-  aliasedAccount(this(account), block.chain_id),
-  1000);
-
-
-// This will create interopCall to set allowance.
-InteropCenter.addToBundle(bundleId,
-            USDCOnDestinationChain,
-            createCalldata("approve", 1000, poolOnDestinationChain),
-            0);
-// This will create interopCall to do the swap.
-InteropCenter.addToBundle(bundleId,
-            poolOnDestinationChain,
-            createCalldata("swap", "USDC_PEPE", 1000, ...),
-            0)
-// And this will be the interopcall to transfer all the assets back.
-InteropCenter.addToBundle(bundleId,
-            pepeBridgeOnDestinationChain,
-            createCalldata("transferAll", block.chain_id, this(account)),
-            0)
-
-
-bundleHash = interopCenter.finishAndSendBundle(bundleId);
-```
-
-In the code above, we created a bundle that anyone can execute on the destination chain. This bundle will handle the
-entire process: minting, approving, swapping, and transferring back.
+This guarantee is about permission, not synchronous execution: a finalized bundle may remain
+unexecuted if nobody submits it, and a verified multi-call bundle may be partially executed or have
+individual calls cancelled through unbundling. Applications requiring all destination-side effects to
+happen must add their own liveness/incentive mechanism and account for the protocol's best-effort
+recovery limits. See {protocol-docs/atomicity/security.md#guarantees}.

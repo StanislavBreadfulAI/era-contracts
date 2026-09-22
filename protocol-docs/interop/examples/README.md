@@ -1,10 +1,13 @@
-# Interop Examples
+# Interop examples
 
-Here, the examples of applying the interop can be found. As we add more functionality, the section will grow.
-- [Cross chain message](./cross_chain_message.md)
-- [Cross chain paymaster](./cross_chain_paymaster.md)
-- [Cross chain swap](./cross_chain_swap.md)
-- [Interop request direct](./interop_request_direct.md)
-- [Interop request two bridges](./interop_request_two_bridges.md)
-- [Interop CTM deployment](./interop_ctm_deployment.md)
+These examples illustrate how to compose the current protocol. They intentionally omit ABI encoding
+and proof-construction code; the normative entry points and restrictions live in
+{protocol-docs/interop.md}.
 
+- [Cross-chain message](./cross_chain_message.md) — a single ERC-7786 call in a one-leg atomic flow.
+- [Asset transfer](./asset_transfer.md) — an indirect call through the L2 asset router.
+- [Atomic multi-leg flow](./cross_chain_swap.md) — coordinating bundles from more than one source.
+
+Every L2 -> L2 example follows the same preparation sequence: choose a fresh sender salt, preview each
+bundle hash with the matching `preview*Hash` quoter, build the canonical flow preimage, then perform the
+real sends with identical call/bundle inputs plus the `atomicBundle` attribute.
