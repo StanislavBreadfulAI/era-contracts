@@ -38,7 +38,7 @@ governance_upgrade_timer_initial_delay = 0
 # Fresh for this upgrade, distinct from stage's: a repeated (salt, initcode) pair resolves to an already
 # deployed contract. Rotate before any regen that must deploy anew:
 #   python3 -c "import secrets; print('0x' + secrets.token_hex(32))"
-create2_factory_salt = "0x0750419e7853b4218863380935d7d1b8ed72e12a1df6800574898286705f6587"
+create2_factory_salt = "0x89d23523bd593003e6d9a904f0deaaac115308f5093816ab134f1e3138051351"
 
 # Sender of the CREATE2 deployments in the deployment runbook. Any funded EOA can send them.
 deployer = "0x04Ac70EA1c1581c17a7fDe5e05feC7bBa351567f"
